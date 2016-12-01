@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2008-2015 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
  * This is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
