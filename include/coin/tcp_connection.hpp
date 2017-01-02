@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -22,28 +22,38 @@
 #define COIN_TCP_CONNECTION_HPP
 
 #include <deque>
-#include <mutex>
+#include <functional>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
 
 #include <boost/asio.hpp>
 
-#include <coin/inventory_cache.hpp>
 #include <coin/inventory_vector.hpp>
 #include <coin/protocol.hpp>
 #include <coin/sha256.hpp>
+#include <coin/transaction_bloom_filter.hpp>
 
 namespace coin {
     
     class alert;
     class block;
     class block_index;
+    class block_locator;
+    class block_merkle;
     class checkpoint_sync;
+    class incentive_answer;
+    class incentive_collaterals;
     class message;
     class stack_impl;
     class tcp_transport;
     class transaction;
+    class transaction_bloom_filter;
+    class zerotime_answer;
+    class zerotime_lock;
+    class zerotime_question;
+    class zerotime_vote;
     
     /**
      * Implement a tcp connection.
@@ -88,7 +98,7 @@ namespace coin {
              * Starts direction_outgoing.
              * @param ep The boost::asio::ip::tcp::endpoint.
              */
-            void start(const boost::asio::ip::tcp::endpoint & ep);
+            void start(const boost::asio::ip::tcp::endpoint ep);
         
             /**
              * Stops
@@ -114,15 +124,23 @@ namespace coin {
              * be sent.
              */
             void send_addr_message(const bool & local_address_only = false);
-            
+        
+            /**
+             * Sends a getblocks message.
+             * @param hash_stop The hash stop.
+             * @param locator The block locator.
+             */
+            void send_getblocks_message(
+                const sha256 & hash_stop, const block_locator & locator
+            );
+        
             /**
              * Sends a getblocks message.
              * @param index_begin The start block index.
              * @param hash_end The end hash.
              */
             void send_getblocks_message(
-                const std::shared_ptr<block_index> & index_begin,
-                const sha256 & hash_end
+                const block_index * index_begin, const sha256 & hash_end
             );
         
             /**
@@ -131,7 +149,7 @@ namespace coin {
              * @param hash_block The hash of the block.
              */
             void send_inv_message(
-                const inventory_vector::type_t & type, const sha256 & hash_block
+                const inventory_vector::type_t type, const sha256 hash_block
             );
         
             /**
@@ -140,8 +158,8 @@ namespace coin {
              * @param block_hashes The hashes of the blocks.
              */
             void send_inv_message(
-                const inventory_vector::type_t & type,
-                const std::vector<sha256> & block_hashes
+                const inventory_vector::type_t type,
+                const std::vector<sha256> block_hashes
             );
         
             /**
@@ -150,7 +168,7 @@ namespace coin {
              * @param
              */
             void send_relayed_inv_message(
-                const inventory_vector & inv, const data_buffer & buffer
+                const inventory_vector inv, const data_buffer buffer
             );
         
             /**
@@ -168,6 +186,52 @@ namespace coin {
              */
             void send_checkpoint_message(checkpoint_sync & checkpoint);
         
+            /**
+             * Sends a block message.
+             * @param blk The block.
+             */
+            void send_block_message(const block blk);
+        
+            /**
+             * Sends a filterload message.
+             * @param filter The transaction_bloom_filter.
+             */
+            void send_filterload_message(
+                const transaction_bloom_filter & filter
+            );
+        
+            /**
+             * Sens a filteradd message.
+             * @param data The data.
+             */
+            void send_filteradd_message(
+                const std::vector<std::uint8_t> & data
+            );
+        
+            /**
+             * Sends a filterclear message.
+             */
+            void send_filterclear_message();
+        
+            /**
+             * Sends a cbbroadcast message.
+             * @param cbbroadcast The chainblender_broadcast message.
+             */
+            void send_cbbroadcast_message(
+                const std::shared_ptr<chainblender_broadcast> & cbbroadcast
+            );
+        
+            /**
+             * Sends a cbleave message.
+             */
+            void send_cbleave_message();
+        
+            /**
+             * Sends a tx message.
+             * @param tx The transaction.
+             */
+            void send_tx_message(const transaction tx);
+            
             /**
              * The tcp_transport.
              */
@@ -211,6 +275,46 @@ namespace coin {
             ;
         
             /**
+             * The (remote) protocol version relay.
+             */
+            const bool & protocol_version_relay() const;
+        
+            /**
+             * Sets the on probe handler (probe-only mode).
+             * @param f The std::function.
+             */
+            void set_on_probe(
+                const std::function<void (const std::uint32_t &,
+                const std::string &, const std::uint64_t &,
+                const std::int32_t &)> & f
+            );
+        
+            /**
+             * Sets the on ianswer handler (probe-only mode).
+             * @param f The std::function.
+             */
+            void set_on_ianswer(
+                const std::function< void (const incentive_answer &) > & f
+            );
+        
+            /**
+             * Sets the on cbbroadcast handler.
+             * @param f The std::function.
+             */
+            void set_on_cbbroadcast(
+                const std::function< void (
+                const chainblender_broadcast &) > & f
+            );
+        
+            /**
+             * Sets the on cbstatus handler.
+             * @param f The std::function.
+             */
+            void set_on_cbstatus(
+                const std::function< void (const chainblender_status &) > & f
+            );
+        
+            /**
              * Sets the hash of the known checkpoint.
              * @param val The sha256.
              */
@@ -222,9 +326,9 @@ namespace coin {
             const sha256 & hash_checkpoint_known() const;
         
             /**
-             * The "seen" protocol::network_address_t objects.
+             * Clears the "seen" protocol::network_address_t objects.
              */
-            std::set<protocol::network_address_t> & seen_network_addresses();
+            void clear_seen_network_addresses();
         
             /**
              * Sets the Denial-of-Service score.
@@ -238,6 +342,50 @@ namespace coin {
             const std::uint8_t & dos_score() const;
         
             /**
+             * Sets the (SPV) Denial-of-Service score.
+             * @param val The value.
+             */
+            void set_spv_dos_score(const double & val);
+        
+            /**
+             * The (SPV) Denial-of-Service score.
+             */
+            const double & spv_dos_score() const;
+        
+            /**
+             * If set to true the connection will stop after the initial
+             * handshake and the address_manager will be informed.
+             * @param val The value.
+             */
+            void set_probe_only(const bool & val);
+        
+            /**
+             * Set's the one-shot ztquestion.
+             * @param val The zerotime_question.
+             */
+            void set_oneshot_ztquestion(
+                const std::shared_ptr<zerotime_question> & val
+            );
+        
+            /**
+             * Set's the cbjoin.
+             * @param val The chainblender_join.
+             */
+            void set_cbjoin(
+                const std::shared_ptr<chainblender_join> & val
+            );
+        
+            /**
+             * The chainblender session id.
+             */
+            const sha256 & hash_chainblender_session_id() const;
+        
+            /**
+             * The identifier.
+             */
+            const std::uint32_t & identifier() const;
+
+            /**
              * If true the transport is valid (usable).
              */
             bool is_transport_valid();
@@ -250,6 +398,21 @@ namespace coin {
             void on_read(const char * buf, const std::size_t & len);
         
         private:
+            /**
+             * Starts direction_incoming.
+             */
+            void do_start();
+        
+            /**
+             * Starts direction_outgoing.
+             * @param ep The boost::asio::ip::tcp::endpoint.
+             */
+            void do_start(const boost::asio::ip::tcp::endpoint ep);
+        
+            /**
+             * Stops
+             */
+            void do_stop();
         
             /**
              * Sends a verack message.
@@ -266,6 +429,26 @@ namespace coin {
              * @param addr The address.
              */
             void send_addr_message(const protocol::network_address_t & addr);
+        
+            /**
+             * Sends an address message.
+             * @param addr The address.
+             */
+            void do_send_addr_message(const protocol::network_address_t & addr);
+        
+            /**
+             * Sends a cbbroadcast message.
+             * @param cbbroadcast The chainblender_broadcast message.
+             */
+            void do_send_cbbroadcast_message(
+                const std::shared_ptr<chainblender_broadcast> & cbbroadcast
+            );
+        
+            /**
+             * Sends a tx message.
+             * @param tx The transaction.
+             */
+            void do_send_tx_message(const transaction & tx);
         
             /**
              * Sends a getaddr message.
@@ -287,18 +470,86 @@ namespace coin {
              * Sends a getdata message if there are any in the queue.
              */
             void send_getdata_message();
+
+            /**
+             * Sends a getheaders message.
+             * @param hash_stop The hash stop.
+             * @param locator The block locator.
+             */
+            void send_getheaders_message(
+                const sha256 & hash_stop, const block_locator & locator
+            );
         
             /**
-             * Sends a block message.
-             * @param blk The block.
+             * Sends a headers message.
+             * @param headers The block headers.
              */
-            void send_block_message(const block & blk);
+            void send_headers_message(const std::vector<block> & headers);
         
             /**
-             * Sends a tx message.
-             * @param tx The transaction.
+             * Sends a merkleblock message.
+             * @param merkleblock The block_merkle.
              */
-            void send_tx_message(const transaction & tx);
+            void send_merkleblock_message(const block_merkle & merkleblock);
+        
+            /**
+             * Sends a ztlock message.
+             * @param ztlock The zerotime_lock.
+             */
+            void send_ztlock_message(const zerotime_lock & ztlock);
+        
+            /**
+             * Sends a ztquestion message.
+             * @param ztquestion The zerotime_question.
+             */
+            void send_ztquestion_message(const zerotime_question & ztquestion);
+        
+            /**
+             * Sends a ztanswer message.
+             * @param ztanswer The zerotime_answer.
+             */
+            void send_ztanswer_message(const zerotime_answer & ztanswer);
+        
+            /**
+             * Sends an ianswer message.
+             */
+            void send_ianswer_message();
+        
+            /**
+             * Sends an iquestion message.
+             */
+            void send_iquestion_message();
+        
+            /**
+             * Sends a ivote message.
+             * @param ivote The incentive_vote.
+             */
+            void send_ivote_message(const incentive_vote & ivote);
+        
+            /**
+             * Sends an isync message.
+             */
+            void send_isync_message();
+        
+            /**
+             * Sends a icols message.
+             * @param icols The incentive_collaterals.
+             */
+            void send_icols_message(
+                const incentive_collaterals & icols
+            );
+        
+            /**
+             * Sends a cbjoin message.
+             * @param cbjoin The chainblender_join message.
+             */
+            void send_cbjoin_message(const chainblender_join & cbjoin);
+        
+            /**
+             * Sends a cbstatus message.
+             * @param cbstatus The chainblender_status message.
+             */
+            void send_cbstatus_message(const chainblender_status & cbstatus);
         
             /**
              * Sends a mempool message.
@@ -345,9 +596,72 @@ namespace coin {
             void do_send_getblocks(const boost::system::error_code & ec);
         
             /**
+             * Sends an inv message.
+             * @param type The inventory_vector::type_t.
+             * @param hash_block The hash of the block.
+             */
+            void do_send_inv_message(
+                const inventory_vector::type_t & type, const sha256 & hash_block
+            );
+        
+            /**
+             * Sends an inv message.
+             * @param type The inventory_vector::type_t.
+             * @param block_hashes The hashes of the blocks.
+             */
+            void do_send_inv_message(
+                const inventory_vector::type_t & type,
+                const std::vector<sha256> & block_hashes
+            );
+        
+            /**
+             * Sends a (relayed) encoded inv given command.
+             * @param command The command.
+             * @param
+             */
+            void do_send_relayed_inv_message(
+                const inventory_vector & inv, const data_buffer & buffer
+            );
+        
+            /**
+             * Sends a block message.
+             * @param blk The block.
+             */
+            void do_send_block_message(const block & blk);
+        
+            /**
+             * Sends getheaders if needed.
+             * @param ec The boost::system::error_code.
+             */
+            void do_send_getheaders(const boost::system::error_code & ec);
+        
+            /**
              * Rebroadcasts addr messages every 24 hours.
              */
             void do_rebroadcast_addr_messages(const std::uint32_t & interval);
+        
+            /**
+             * The cbstatus timer handler.
+             * @param interval The interval.
+             */
+            void do_send_cbstatus(const std::uint32_t & interval);
+        
+            /**
+             * The isync timer handler.
+             * @param interval The interval.
+             */
+            void do_send_isync(const std::uint32_t & interval);
+    
+            /**
+             * Inserts a seen inventor_vector object.
+             * @param inv The inventory_vector.
+             */
+            bool insert_inventory_vector_seen(const inventory_vector & inv);
+        
+            /**
+             * The identifier.
+             */
+            std::uint32_t m_identifier;
         
             /**
              * The tcp_transport.
@@ -390,6 +704,40 @@ namespace coin {
             protocol::network_address_t m_protocol_version_addr_src;
         
             /**
+             * The (remote) protocol version relay.
+             */
+            bool m_protocol_version_relay;
+        
+            /**
+             * The probe handler (probe-only mode).
+             */
+            std::function<
+                void (const std::uint32_t &, const std::string &,
+                const std::uint64_t &, const std::int32_t &)
+            > m_on_probe;
+        
+            /**
+             * The ianswer handler (probe-only mode).
+             */
+            std::function<
+                void (const incentive_answer &)
+            > m_on_ianswer;
+        
+            /**
+             * The cbbroadcast handler.
+             */
+            std::function<
+                void (const chainblender_broadcast &)
+            > m_on_cbbroadcast;
+        
+            /**
+             * The cbstatus handler.
+             */
+            std::function<
+                void (const chainblender_status &)
+            > m_on_cbstatus;
+        
+            /**
              * Our public address as advertised in the version message.
              */
             boost::asio::ip::address m_address_public;
@@ -420,9 +768,47 @@ namespace coin {
             std::uint8_t m_dos_score;
         
             /**
+             * The (SPV) Denial-of-Service score.
+             */
+            double m_spv_dos_score;
+        
+            /**
              * The seen alerts to prevent broadcasting duplicates.
              */
             std::set<sha256> m_seen_alerts;
+        
+            /**
+             * If set to true the connection will stop after the initial
+             * handshake occurs and the address_manager will be informed.
+             */
+            bool m_probe_only;
+        
+            /**
+             * The one-shot ztquestion (if any).
+             */
+            std::shared_ptr<zerotime_question> m_oneshot_ztquestion;
+        
+            /**
+             * The cbjoin (if any).
+             */
+            std::shared_ptr<chainblender_join> m_chainblender_join;
+        
+            /**
+             * The chainblender session id.
+             */
+            sha256 m_hash_chainblender_session_id;
+        
+            /**
+             * The state.
+             */
+            enum
+            {
+                state_none,
+                state_starting,
+                state_started,
+                state_stopping,
+                state_stopped,
+            } m_state;
         
         protected:
         
@@ -434,7 +820,7 @@ namespace coin {
             /**
              * The boost::asio::strand.
              */
-            boost::asio::strand strand_;
+            boost::asio::strand & strand_;
         
             /**
              * The stack_impl.
@@ -447,11 +833,6 @@ namespace coin {
             std::deque<char> read_queue_;
         
             /**
-             * The read_queue_ std::mutex.
-             */
-            std::mutex mutex_read_queue_;
-        
-            /**
              * The ping timer.
              */
             boost::asio::basic_waitable_timer<
@@ -459,9 +840,16 @@ namespace coin {
             > timer_ping_;
         
             /**
+             * The ping timeout timer.
+             */
+            boost::asio::basic_waitable_timer<
+                std::chrono::steady_clock
+            > timer_ping_timeout_;
+        
+            /**
              * The ping interval in seconds.
              */
-            enum { interval_ping = 60 * 30 };
+            enum { interval_ping = 120 };
         
             /**
              * If true we have sent an initial getblock's message.
@@ -474,24 +862,9 @@ namespace coin {
             std::vector<inventory_vector> getdata_;
         
             /**
-             * The getdata mutex.
-             */
-            std::recursive_mutex mutex_getdata_;
-        
-            /**
-             * The inventory cache (known).
-             */
-            inventory_cache inventory_cache_;
-        
-            /**
-             * The inventory_cache mutex.
-             */
-            std::mutex mutex_inventory_cache_;
-        
-            /**
              * The last getblocks index_begin.
              */
-            std::shared_ptr<block_index> last_getblocks_index_begin_;
+            block_index * last_getblocks_index_begin_;
         
             /**
              * The last getblocks hash_end.
@@ -511,6 +884,13 @@ namespace coin {
             > timer_delayed_stop_;
         
             /**
+             * The version timeout timer.
+             */
+            boost::asio::basic_waitable_timer<
+                std::chrono::steady_clock
+            > timer_version_timeout_;
+        
+            /**
              * The getblocks timer.
              */
             boost::asio::basic_waitable_timer<
@@ -518,11 +898,89 @@ namespace coin {
             > timer_getblocks_;
         
             /**
+             * The getheaders timer.
+             */
+            boost::asio::basic_waitable_timer<
+                std::chrono::steady_clock
+            > timer_getheaders_;
+        
+            /**
              * The addr rebroadcast timer.
              */
             boost::asio::basic_waitable_timer<
                 std::chrono::steady_clock
             > timer_addr_rebroadcast_;
+        
+            /**
+             * The last time a getblocks was sent.
+             */
+            std::time_t time_last_getblocks_sent_;
+        
+            /**
+             * The last time a headers was received.
+             */
+            std::time_t time_last_headers_received_;
+        
+            /**
+             * The cbstatus timer.
+             */
+            boost::asio::basic_waitable_timer<
+                std::chrono::steady_clock
+            > timer_cbstatus_;
+        
+            /**
+             * If true we have sent a cbstatus message with a code of
+             * chainblender_status::code_ready.
+             */
+            bool did_send_cbstatus_cbready_code_;
+        
+            /**
+             * The BIP-0037 transaction bloom filter.
+             */
+            std::unique_ptr<transaction_bloom_filter>
+                transaction_bloom_filter_
+            ;
+        
+            /**
+             * The transaction hashes from merkle block matches,
+             */
+            std::set<sha256> spv_transactions_matched_;
+
+            /**
+             * The (SPV) getheaders timeout timer.
+             */
+            boost::asio::basic_waitable_timer<
+                std::chrono::steady_clock
+            > timer_spv_getheader_timeout_;
+        
+            /**
+             * The (SPV) getblocks timeout timer.
+             */
+            boost::asio::basic_waitable_timer<
+                std::chrono::steady_clock
+            > timer_spv_getblocks_timeout_;
+
+            /**
+             * The seen inventory_vector object set.
+             */
+            std::set<inventory_vector> inventory_vectors_seen_set_;
+        
+            /**
+             * The seen inventory_vector object set.
+             */
+            std::deque<inventory_vector> inventory_vectors_seen_queue_;
+        
+            /**
+             * The isync timer.
+             */
+            boost::asio::basic_waitable_timer<
+                std::chrono::steady_clock
+            > timer_isync_;
+        
+            /**
+             * If true we sent an isync message.
+             */
+            bool did_send_isync_;
     };
     
 } // namespace coin

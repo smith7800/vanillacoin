@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -29,6 +29,7 @@
 #include <coin/reward.hpp>
 #include <coin/time.hpp>
 #include <coin/transaction.hpp>
+#include <coin/script_checker.hpp>
 #include <coin/transaction_pool.hpp>
 #include <coin/utility.hpp>
 
@@ -351,12 +352,35 @@ bool transaction::is_coin_stake() const
     );
 }
 
-bool transaction::is_standard() const
+bool transaction::is_standard()
 {
     if (m_version > current_version)
     {
         return false;
     }
+    
+    /**
+     * Clear
+     */
+    clear();
+    
+    /**
+     * Encode
+     */
+    encode();
+    
+    /**
+     * Check the size.
+     */
+    if (size() > maxmimum_length / 3)
+    {
+        return false;
+    }
+
+    /**
+     * Clear
+     */
+    clear();
     
     for (auto & i : m_transactions_in)
     {
@@ -597,16 +621,19 @@ std::int64_t transaction::get_minimum_fee(
     /**
      * Raise the price as the block approaches full.
      */
-    if (block_size != 1 && new_block_size >= constants::max_block_size_gen / 2)
+    if (
+        block_size != 1 &&
+        new_block_size >= block::get_maximum_size_median220() / 4
+        )
     {
-        if (new_block_size >= constants::max_block_size_gen)
+        if (new_block_size >= block::get_maximum_size_median220() / 2)
         {
             return constants::max_money_supply;
         }
         
         min_fee *=
-            constants::max_block_size_gen /
-            (constants::max_block_size_gen - new_block_size)
+            (block::get_maximum_size_median220() / 2) /
+            ((block::get_maximum_size_median220() / 2) - new_block_size)
         ;
     }
 
@@ -618,15 +645,19 @@ std::int64_t transaction::get_minimum_fee(
     return min_fee;
 }
 
-bool transaction::accept_to_transaction_pool(
+std::pair<bool, std::string> transaction::accept_to_transaction_pool(
     db_tx & tx_db, bool * missing_inputs
     )
 {
-    return transaction_pool::instance().accept(tx_db, *this, missing_inputs);
+    return
+        transaction_pool::instance().accept(tx_db, *this, missing_inputs)
+    ;
 }
 
 bool transaction::read_from_disk(const transaction_position & position)
 {
+    assert(globals::instance().is_client_spv() == false);
+    
     auto f = block::file_open(position.file_index(), 0, "rb");
     
     if (f)
@@ -642,6 +673,16 @@ bool transaction::read_from_disk(const transaction_position & position)
              * Decode
              */
             decode(buffer);
+            
+            /**
+             * Clear the buffer.
+             */
+            clear();
+            
+            /**
+             * Close the file.
+             */
+            f->close(), f = nullptr;
         }
         else
         {
@@ -710,7 +751,7 @@ bool transaction::fetch_inputs(
     )
 {
     /**
-     * If the transaction is invalid this will be set to true.s
+     * If the transaction is invalid this will be set to true.
      */
     invalid = false;
 
@@ -792,7 +833,7 @@ bool transaction::fetch_inputs(
                 previous_out.get_hash()) == false
                 )
             {
-                log_error(
+                log_debug(
                     "Transaction failed to fetch inputs, " <<
                     get_hash().to_string().substr(0, 10) <<
                     " pool previous transaction not found " <<
@@ -806,7 +847,7 @@ bool transaction::fetch_inputs(
                 previous_out.get_hash()
             );
            
-             if (found == false)
+            if (found == false)
             {
                 tx_index.spent().resize(tx_prev.transactions_out().size());
             }
@@ -899,9 +940,10 @@ bool transaction::connect_inputs(
     std::map<sha256, std::pair<transaction_index, transaction> > & inputs,
     std::map<sha256, transaction_index> & test_pool,
     const transaction_position & position_tx_this,
-    const std::shared_ptr<block_index> & ptr_block_index,
+    const block_index * ptr_block_index,
     const bool & connect_block, const bool & create_new_block,
-    const bool & strict_pay_to_script_hash
+    const bool & strict_pay_to_script_hash, const bool & check_signature,
+    std::vector<script_checker> * script_checker_checks
     )
 {
     if (is_coin_base() == false)
@@ -945,7 +987,9 @@ bool transaction::connect_inputs(
                 for (
                     auto pindex = ptr_block_index;
                     pindex && ptr_block_index->height() - pindex->height() <
-                    constants::coinbase_maturity;
+                    (constants::test_net ?
+                    constants::coinbase_maturity_test_network :
+                    constants::coinbase_maturity);
                     pindex = pindex->block_index_previous()
                     )
                 {
@@ -1001,6 +1045,15 @@ bool transaction::connect_inputs(
             }
 
         }
+        
+        /**
+         * Reserve memory for the script_checker's.
+         */
+        if (script_checker_checks)
+        {
+            script_checker_checks->reserve(m_transactions_in.size());
+        }
+        
         /**
          * Only if all inputs pass do we perform expensive ECDSA signature
          * checks. This may help prevent CPU exhaustion attacks.
@@ -1048,36 +1101,57 @@ bool transaction::connect_inputs(
                 checkpoints::instance().get_total_blocks_estimate())) == false
                 )
             {
-                if (
-                    script::verify_signature(tx_previous, *this, i,
-                    strict_pay_to_script_hash, 0) == false
-                    )
+                if (check_signature == true)
                 {
                     /**
-                     * Only during transition phase for P2SH.
+                     * Allocate the script_checker.
                      */
-                    if (
-                        strict_pay_to_script_hash &&
-                        script::verify_signature(tx_previous, *this, i,
-                        false, 0)
-                        )
+                    script_checker checker(
+                        tx_previous, *this, i, strict_pay_to_script_hash, 0
+                    );
+                    
+                    /**
+                     * If we were passsed a script_checker array use it.
+                     */
+                    if (script_checker_checks)
                     {
+                        script_checker_checks->push_back(checker);
+                    }
+                    else if (checker.check() == false)
+                    {
+                        if (strict_pay_to_script_hash == true)
+                        {
+                            /**
+                             * Allocate the script_checker.
+                             */
+                            script_checker checker(
+                                tx_previous, *this, i, false, 0
+                            );
+                    
+                            /**
+                             * Only during transition phase for P2SH.
+                             * @note true means failure here.
+                             */
+                            if (checker.check() == true)
+                            {
+                                log_error(
+                                    "Transaction connect inputs failed, " <<
+                                    get_hash().to_string().substr(0, 10) <<
+                                    " P2SH signature verification vailed."
+                                );
+                                
+                                return false;
+                            }
+                        }
+
                         log_error(
                             "Transaction connect inputs failed, " <<
                             get_hash().to_string().substr(0, 10) <<
-                            " P2SH signature verification vailed."
+                            " signature verification failed."
                         );
                         
                         return false;
                     }
-
-                    log_error(
-                        "Transaction connect inputs failed, " <<
-                        get_hash().to_string().substr(0, 10) <<
-                        " signature verification failed."
-                    );
-                    
-                    return false;
                 }
             }
 
@@ -1139,56 +1213,6 @@ bool transaction::connect_inputs(
                     "Transaction connect inputs failed, " <<
                     get_hash().to_string().substr(0, 10) <<
                     " value in is less than value out."
-                );
-                
-                return false;
-            }
-
-            /**
-             * Tally transaction fees.
-             */
-            std::int64_t tx_fee = value_in - get_value_out();
-            
-            if (tx_fee < 0)
-            {
-                log_error(
-                    "Transaction connect inputs failed, " <<
-                    get_hash().to_string().substr(0, 10) <<
-                    " transaction fee is less than zero."
-                );
-                
-                return false;
-            }
-            
-            /**
-             * Enforce transaction fees for every block (ppcoin).
-             */
-            if (tx_fee < get_minimum_fee())
-            {
-                if (connect_block)
-                {
-                    log_error(
-                        "Transaction connect inputs failed, " <<
-                        get_hash().to_string().substr(0, 10) <<
-                        " not paying required fee = " <<
-                        utility::format_money(get_minimum_fee()) <<
-                        ", paid = " << utility::format_money(tx_fee) << "."
-                    );
-                    
-                    return false;
-                }
-                else
-                {
-                    return false;
-                }
-            }
-            
-            fees += tx_fee;
-            
-            if (utility::money_range(fees) == false)
-            {
-                log_error(
-                    "Transaction connect inputs failed, fees out of range."
                 );
                 
                 return false;
@@ -1424,11 +1448,21 @@ bool transaction::get_coin_age(db_tx & tx_db, std::uint64_t & coin_age) const
             big_number(value_in) *
             (m_time - tx_previous.time()) / constants::cent
         ;
+
+        log_none(
+            "Transaction coin age value_in = " << value_in <<
+            ", time diff = " << m_time - tx_previous.time() <<
+            ", cent_seconds = " << cent_second.to_string() << "."
+        );
     }
 
     big_number coin_day =
         cent_second * constants::cent / constants::coin / (24 * 60 * 60)
     ;
+
+    log_none(
+        "Transaction coin age coin_day = " << coin_day.to_string() << "."
+    );
     
     coin_age = coin_day.get_uint64();
     
@@ -1442,9 +1476,7 @@ bool transaction::check()
         log_error(
             "Transaction check failed, tx in is empty:\n" << to_string()
         );
-        
-        throw std::runtime_error("tx in empty");
-        
+
         return false;
     }
     
@@ -1453,12 +1485,25 @@ bool transaction::check()
         log_error(
             "Transaction check failed, tx out is empty:\n" << to_string()
         );
-        
-        throw std::runtime_error("tx out empty");
-        
+
         return false;
     }
-    
+
+    /**
+     * Check the transaction did not arrive in a flying delorean.
+     */
+    if (
+        m_time > time::instance().get_adjusted() + constants::max_clock_drift
+        )
+    {
+        log_error(
+            "Transaction check failed, timestamp too far in the future:\n" <<
+            to_string()
+        );
+     
+        return false;
+    }
+
     /**
      * Clear
      */
@@ -1472,12 +1517,20 @@ bool transaction::check()
     /**
      * Check the size.
      */
-    if (size() > constants::max_block_size)
+    if (size() > maxmimum_length)
     {
-        throw std::runtime_error("size limits failed");
+        log_error(
+            "Transaction check failed, size limits failed:\n" <<
+            to_string()
+        );
         
         return false;
     }
+
+    /**
+     * Clear
+     */
+    clear();
     
     /**
      * The value out.
@@ -1491,22 +1544,31 @@ bool transaction::check()
     {
         if (i.is_empty() && is_coin_base() == false && is_coin_stake() == false)
         {
-            throw std::runtime_error("tx out empty for user transaction");
+            log_error(
+                "Transaction check failed, tx out empty for user "
+                "transaction:\n" << to_string()
+            );
         
             return false;
         }
         
         if (i.value() < 0)
         {
-            throw std::runtime_error("tx out value is negative");
+            log_error(
+                "Transaction check failed, tx out value is negative:\n" <<
+                to_string()
+            );
         
             return false;
         }
         
         if (i.value() > constants::max_money_supply)
         {
-            throw std::runtime_error("tx out value is too high");
-        
+            log_error(
+                "Transaction check failed, tx out value is too high:\n" <<
+                to_string()
+            );
+            
             return false;
         }
         
@@ -1514,8 +1576,11 @@ bool transaction::check()
         
         if (utility::money_range(value_out) == false)
         {
-            throw std::runtime_error("tx out total out of range");
-        
+            log_error(
+                "Transaction check failed, tx out total out of range:\n" <<
+                to_string()
+            );
+            
             return false;
         }
     }
@@ -1542,8 +1607,11 @@ bool transaction::check()
             m_transactions_in[0].script_signature().size() > 100
             )
         {
-            throw std::runtime_error("coinbase script size");
-        
+            log_debug(
+                "Transaction check failed, coinbase script size:\n" <<
+                to_string()
+            );
+            
             return false;
         }
     }
@@ -1553,7 +1621,10 @@ bool transaction::check()
         {
             if (i.previous_out().is_null())
             {
-                throw std::runtime_error("prev_out is null");
+                log_error(
+                    "Transaction check failed, prev_out is null:\n" <<
+                    to_string()
+                );
             
                 return false;
             }
@@ -1596,4 +1667,9 @@ const std::vector<transaction_in> & transaction::transactions_in() const
 const std::vector<transaction_out> & transaction::transactions_out() const
 {
     return m_transactions_out;
+}
+
+const std::uint32_t & transaction::time_lock() const
+{
+    return m_time_lock;
 }

@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -25,6 +25,7 @@ using namespace coin;
 transaction_merkle::transaction_merkle()
     : transaction()
     , m_index(-1)
+    , m_spv_block_height(0)
 {
     // ...
 }
@@ -32,6 +33,7 @@ transaction_merkle::transaction_merkle()
 transaction_merkle::transaction_merkle(const transaction & tx)
     : transaction(tx)
     , m_index(-1)
+    , m_spv_block_height(0)
 {
     // ...
 }
@@ -78,13 +80,15 @@ void transaction_merkle::decode(data_buffer & buffer)
     m_index = buffer.read_int32();
 }
 
-bool transaction_merkle::accept_to_memory_pool(db_tx & tx_db)
+std::pair<bool, std::string> transaction_merkle::accept_to_memory_pool(
+    db_tx & tx_db
+    )
 {
-    if (globals::instance().is_client())
+    if (globals::instance().is_client_spv() == true)
     {
         if (is_in_main_chain() == false && client_connect_inputs() == false)
         {
-            return false;
+            return std::make_pair(false, "client unknown");
         }
         
         return transaction::accept_to_transaction_pool(tx_db);
@@ -94,12 +98,22 @@ bool transaction_merkle::accept_to_memory_pool(db_tx & tx_db)
         return transaction::accept_to_transaction_pool(tx_db);
     }
     
-    return false;
+    return std::make_pair(false, "unknown");
 }
 
-bool transaction_merkle::accept_to_memory_pool()
+std::pair<bool, std::string> transaction_merkle::accept_to_memory_pool()
 {
     db_tx tx_db("r");
     
     return accept_to_memory_pool(tx_db);
+}
+
+void transaction_merkle::set_spv_block_height(const std::int32_t & val)
+{
+    m_spv_block_height = val;
+}
+
+const std::int32_t & transaction_merkle::spv_block_height() const
+{
+    return m_spv_block_height;
 }

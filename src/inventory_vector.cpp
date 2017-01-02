@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -21,8 +21,10 @@
 #include <coin/data_buffer.hpp>
 #include <coin/db_tx.hpp>
 #include <coin/globals.hpp>
+#include <coin/incentive.hpp>
 #include <coin/inventory_vector.hpp>
 #include <coin/transaction_pool.hpp>
+#include <coin/zerotime.hpp>
 
 using namespace coin;
 
@@ -87,6 +89,11 @@ bool inventory_vector::decode(data_buffer & buffer)
     return true;
 }
 
+void inventory_vector::set_type(const type_t & val)
+{
+    m_type = val;
+}
+
 const inventory_vector::type_t & inventory_vector::type() const
 {
     return m_type;
@@ -101,8 +108,8 @@ bool inventory_vector::is_know_type() const
 {
     return
         m_type > type_error && m_type <
-        sizeof(protocol::inventory_type_names) /
-        sizeof(protocol::inventory_type_names[0])
+        static_cast<type_t> (sizeof(protocol::inventory_type_names) /
+        sizeof(protocol::inventory_type_names[0]))
     ;
 }
 
@@ -154,6 +161,77 @@ bool inventory_vector::already_have(
                 globals::instance().orphan_blocks().count(inv.hash())
             ;
         }
+        break;
+        case type_msg_ztlock:
+        {
+            return zerotime::instance().locks().count(inv.hash()) > 0;
+        }
+        break;
+        case type_msg_ztvote:
+        {
+            return zerotime::instance().votes().count(inv.hash()) > 0;
+        }
+        break;
+        case type_msg_ivote:
+        {
+            return incentive::instance().votes().count(inv.hash()) > 0;
+        }
+        break;
+        default:
+        break;
+    }
+    
+    return true;
+}
+
+bool inventory_vector::spv_already_have(const inventory_vector & inv)
+{
+    switch (inv.type())
+    {
+        case type_error:
+        {
+            // ...
+        }
+        break;
+        case type_msg_tx:
+        {
+            auto tx_in_map = transaction_pool::instance().exists(inv.hash());
+            
+            return
+                tx_in_map ||
+                globals::instance().orphan_transactions().count(inv.hash()) > 0
+            ;
+        }
+        break;
+        case type_msg_block:
+        case type_msg_filtered_block_nonstandard:
+        {
+            /**
+             * We exclude orphans here because of the way they are handled
+             * differently. Adding them here using the current design would
+             * stall the initial synchronisation
+             */
+            return
+                globals::instance().spv_block_merkles().count(inv.hash())
+            ;
+        }
+        break;
+        case type_msg_ztlock:
+        {
+            return zerotime::instance().locks().count(inv.hash()) > 0;
+        }
+        break;
+        case type_msg_ztvote:
+        {
+            return zerotime::instance().votes().count(inv.hash()) > 0;
+        }
+        break;
+        case type_msg_ivote:
+        {
+            return incentive::instance().votes().count(inv.hash()) > 0;
+        }
+        break;
+        default:
         break;
     }
     

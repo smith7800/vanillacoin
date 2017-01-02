@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -21,9 +21,11 @@
 #ifndef COIN_STATUS_MANAGER_HPP
 #define COIN_STATUS_MANAGER_HPP
 
+#include <cstdint>
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <boost/asio.hpp>
@@ -41,14 +43,9 @@ namespace coin {
         
             /**
              * Constructor
-             * @param ios The boost::asio::io_service.
-             * @param s The boost::asio::strand.
              * @param owner The stack_impl.
              */
-            status_manager(
-                boost::asio::io_service & ios, boost::asio::strand & s,
-                stack_impl & owner
-            );
+            status_manager(stack_impl & owner);
         
             /**
              * Starts
@@ -82,15 +79,25 @@ namespace coin {
             void do_tick(const std::uint32_t & interval);
 
             /**
+             * The boost::asio::io_service loop.
+             */
+            void loop();
+        
+            /**
+             * The std::thread.
+             */
+            std::thread thread_;
+        
+            /**
              * The boost::asio::io_service.
              */
-            boost::asio::io_service & io_service_;
+            boost::asio::io_service io_service_;
         
             /**
              * The boost::asio::strand.
              */
-            boost::asio::strand & strand_;
-        
+            boost::asio::strand strand_;
+            
             /**
              * The stack_impl.
              */

@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -22,7 +22,9 @@
 #define COIN_UTILITY_HPP
 
 #if (defined _MSC_VER)
-                
+    // ...
+#elif (defined __ANDROID__)
+#include <sys/vfs.h>
 #else
 #include <sys/statvfs.h>
 #endif // _MSC_VER
@@ -287,9 +289,14 @@ namespace coin {
             }
         
             /**
-             * Returns true if no blocks have been downloaded.
+             * Returns true if we are behind on the ledger.
              */
             static bool is_initial_block_download();
+        
+            /**
+             * Returns true if we are behind on the ledger.
+             */
+            static bool is_spv_initial_block_download();
 
             /**
              * Returns true if if is a chain file.
@@ -333,8 +340,16 @@ namespace coin {
              * @param index The block_index.
              * @param is_pos If true it is proof-of-stake,
              */
-            static const std::shared_ptr<block_index> get_last_block_index(
-                const std::shared_ptr<block_index> & index, const bool & is_pos
+            static const block_index * get_last_block_index(
+                const block_index * index, const bool & is_pos
+            );
+        
+            /**
+             * Finds a block by it's height.
+             * @param height The height.
+             */
+            static block_index * find_block_index_by_height(
+                const std::uint32_t & height
             );
         
             /**
@@ -372,11 +387,36 @@ namespace coin {
             /**
              * Gets the next required target.
              * @param index_last The last block index.
+             */
+            static std::uint32_t get_target_spacing(
+                const block_index * index_last
+            );
+        
+            /**
+             * Gets the next required target.
+             * @param index_last The last block index.
              * @param is_pos If true it is proof-of-stake.
              */
             static std::uint32_t get_next_target_required(
-                const std::shared_ptr<block_index> & index_last,
-                const bool & is_pos
+                const block_index * index_last, const bool & is_pos
+            );
+        
+            /**
+             * Gets the next required target.
+             * @param index_last The last block index.
+             * @param is_pos If true it is proof-of-stake.
+             */
+            static std::uint32_t get_next_target_required_v020(
+                const block_index * index_last, const bool & is_pos
+            );
+        
+            /**
+             * Gets the next required target.
+             * @param index_last The last block index.
+             * @param is_pos If true it is proof-of-stake.
+             */
+            static std::uint32_t get_next_target_required_v023(
+                const block_index * index_last, const bool & is_pos
             );
         
             /**
@@ -390,6 +430,44 @@ namespace coin {
                 ;
                 
                 return (ret << 16) | (ret >> 16);
+            }
+        
+            /**
+             * Gets a transaction from the pool. If it exists in a block the
+             * hash will be set.
+             * @param hash_tx The hash of the transaction.
+             * @param tx The transaction.
+             * @param hash_block_out The hash of the block (out) if found.
+             */
+            static bool get_transaction(
+                const sha256 & hash_tx, transaction & tx,
+                sha256 & hash_block_out
+            );
+        
+            /**
+             * Calculates the difficulty given bits.
+             * @param bits The bits.
+             */
+            static double difficulty_from_bits(const std::uint32_t & bits)
+            {
+                int shift = (bits >> 24) & 0xff;
+
+                double diff =
+                    static_cast<double> (0x0000ffff) /
+                    static_cast<double> (bits & 0x00ffffff)
+                ;
+
+                while (shift < 29)
+                {
+                    diff *= 256.0, shift++;
+                }
+                
+                while (shift > 29)
+                {
+                    diff /= 256.0, shift--;
+                }
+
+                return diff;
             }
         
             /**

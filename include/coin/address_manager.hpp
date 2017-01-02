@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -30,12 +30,17 @@
 #include <boost/asio.hpp>
 
 #include <coin/hash.hpp>
+#include <coin/key_public.hpp>
 #include <coin/logger.hpp>
 #include <coin/protocol.hpp>
 #include <coin/time.hpp>
+#include <coin/transaction_in.hpp>
 
 namespace coin {
 
+    class message;
+    class stack_impl;
+    
     /**
      * Implements an address manager.
      */
@@ -281,8 +286,14 @@ namespace coin {
         
             /**
              * Constructor
+             * @param ios The boost::asio::io_service.
+             * @param s The boost::asio::strand.
+             * @param owner The stack_impl.
              */
-            address_manager();
+            address_manager(
+                boost::asio::io_service & ios, boost::asio::strand & s,
+                stack_impl & owner
+            );
         
             /**
              * Starts
@@ -304,6 +315,15 @@ namespace coin {
              */
             void save();
  
+             /**
+             * Handles a message.
+             * @param ep The boost::asio::ip::tcp::endpoint.
+             * @param msg The message.
+             */
+            bool handle_message(
+                const boost::asio::ip::tcp::endpoint & ep, message & msg
+            );
+        
             /**
              * Finds address_info_t from a protocol::network_address_t.
              * @param addr The protocol::network_address_t.
@@ -405,6 +425,40 @@ namespace coin {
              */
             const std::size_t size() const;
         
+            /**
+             * Defines a recent endpoint.
+             */
+            typedef struct recent_endpoint_s
+            {
+                protocol::network_address_t addr;
+                std::string wallet_address;
+                key_public public_key;
+                transaction_in tx_in;
+                std::time_t time;
+                std::uint32_t protocol_version;
+                std::string protocol_version_user_agent;
+                std::uint64_t protocol_version_services;
+                std::int32_t protocol_version_start_height;
+                
+                friend bool operator < (
+                    const recent_endpoint_s & a, const recent_endpoint_s & b
+                    )
+                {
+                    return a.addr < b.addr;
+                }
+                
+            } recent_endpoint_t;
+        
+            /**
+             * The recently marked good endpoints.
+             */
+            std::vector<recent_endpoint_t> recent_good_endpoints();
+        
+            /**
+             * Prints.
+             */
+            void print();
+        
         private:
 
             /**
@@ -428,7 +482,42 @@ namespace coin {
                 const std::uint32_t & first, const std::uint32_t & second
             );
         
+            /**
+             * The recently marked good endpoints.
+             */
+            std::map<protocol::network_address_t, recent_endpoint_t>
+                m_recent_good_endpoints
+            ;
+        
         protected:
+        
+            /**
+             * The timer handler.
+             * @param ec The boost::system::error_code.
+             */
+            void tick(const boost::system::error_code & ec);
+        
+            /**
+             * The boost::asio::io_service.
+             */
+            boost::asio::io_service & io_service_;
+        
+            /**
+             * The boost::asio::strand.
+             */
+            boost::asio::strand & strand_;
+        
+            /**
+             * The stack_impl.
+             */
+            stack_impl & stack_impl_;
+        
+            /**
+             * The timer.
+             */
+            boost::asio::basic_waitable_timer<
+                std::chrono::steady_clock
+            > timer_;
         
             /**
              * The key used to randomize bucket selection.
@@ -439,7 +528,7 @@ namespace coin {
              * The address_info_t map.
              */
             std::map<std::uint32_t, address_info_t> address_info_map_;
-
+        
             /**
              * The protocol::network_address_t map.
              */
@@ -451,11 +540,6 @@ namespace coin {
              * The randomly ordered id's.
              */
             std::vector<std::uint32_t> random_ids_;
-        
-            /**
-             * The random_ids_ std::recursive_mutex.
-             */
-            mutable std::recursive_mutex mutex_random_ids_;
 
             /**
              * The last used id.
@@ -476,21 +560,28 @@ namespace coin {
              * The new buckets.
              */
             std::vector< std::set<std::uint32_t> > buckets_new_;
-        
-            /**
-             * The buckets_new_ std::recursive_mutex.
-             */
-            std::recursive_mutex mutex_buckets_new_;
-        
+
             /**
              * The tried buckets.
              */
             std::vector< std::vector<std::uint32_t> > buckets_tried_;
+
+            /**
+             * The probed endpoints.
+             */
+            std::map<boost::asio::ip::tcp::endpoint, std::time_t>
+                probed_endpoints_
+            ;
         
             /**
-             * The buckets_tried_ std::recursive_mutex.
+             * The number of ticks that have occured.
              */
-            std::recursive_mutex mutex_buckets_tried_;
+            std::size_t ticks_;
+        
+            /**
+             * The mutex.
+             */
+            mutable std::recursive_mutex mutex_;
     };
     
 } // namespace coin

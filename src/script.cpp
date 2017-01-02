@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -707,15 +707,15 @@ bool script::evaluate(
         {
             bool fExec = count(exec.begin(), exec.end(), false) == 0;
             
-            //
-            // Read instruction
-            //
+            /**
+             * Read instruction
+             */
             if (scr.get_op(pc, opcode, vchPushValue) == false)
             {
                 return false;
             }
 
-            if (vchPushValue.size() > 520)
+            if (vchPushValue.size() > max_element_size)
             {
                 return false;
             }
@@ -1177,7 +1177,7 @@ bool script::evaluate(
                         
                         pop_stack(stack);
                         
-                        if (stack_top(stack, -1).size() > 520)
+                        if (stack_top(stack, -1).size() > max_element_size)
                         {
                             return false;
                         }
@@ -1973,7 +1973,7 @@ unsigned int script::get_sig_op_count(const bool & accurate) const
             n++;
         }
         else if (
-            opcode == op_checkmultisigverify ||
+            opcode == op_checkmultisig ||
             opcode == op_checkmultisigverify
             )
         {
@@ -2507,7 +2507,7 @@ bool script::verify_script(
     
     if (to_bool(stack.back()) == false)
     {
-        log_debug("Script, verify script failed, 4.");
+        log_debug("Script, verify script failed, 4 (eval = false).");
         
         return false;
     }
@@ -2563,7 +2563,7 @@ bool script::verify_signature(
     assert(in < tx_to.transactions_in().size());
     
     const auto & tx_in = tx_to.transactions_in()[in];
-    
+
     if (tx_in.previous_out().n() >= tx_from.transactions_out().size())
     {
         return false;
@@ -2573,7 +2573,7 @@ bool script::verify_signature(
     {
         return false;
     }
-    
+
     const auto & tx_out = tx_from.transactions_out()[tx_in.previous_out().n()];
     
     return verify_script(

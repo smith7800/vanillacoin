@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -22,6 +22,7 @@
 #define COIN_TRANSACTION_POOL_HPP
 
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include <coin/db_tx.hpp>
@@ -52,11 +53,19 @@ namespace coin {
             static transaction_pool & instance();
         
             /**
-             *
+             * Accepts a transaction.
+             * @param dbtx The db_tx.
+             * @param missing_inputs If set to true there are inputs missing.
              */
-            bool accept(
+            std::pair<bool, std::string> accept(
                 db_tx & dbtx, transaction & tx, bool * missing_inputs
             );
+        
+            /**
+             * Checks the transaction to see if it is acceptable.
+             * @param tx The transaction.
+             */
+            std::pair<bool, std::string> acceptable(transaction & tx);
         
             /**
              * Removes a transaction.
@@ -65,22 +74,23 @@ namespace coin {
             bool remove(transaction & tx);
         
             /**
-             *
+             * Clears
              */
             void clear();
         
             /**
-             *
+             * Queries hashes.
+             * @param transaction_ids The transaction_id's.
              */
             void query_hashes(std::vector<sha256> & transaction_ids);
 
             /**
-             *
+             * The size.
              */
             std::size_t size();
     
             /**
-             *
+             * If true the transaction given hash exists.
              */
             bool exists(const sha256 & hash);
 
@@ -93,6 +103,11 @@ namespace coin {
              * The transactions.
              */
             std::map<sha256, transaction> & transactions();
+        
+            /**
+             * The next transactions.
+             */
+            const std::map<point_out, point_in> & transactions_next() const;
         
             /**
              * The number of transactons updated.
@@ -113,6 +128,11 @@ namespace coin {
             std::map<sha256, transaction> m_transactions;
         
             /**
+             * The next transactions.
+             */
+            std::map<point_out, point_in> m_transactions_next;
+        
+            /**
              * The number of transactons updated.
              */
             std::uint32_t m_transactions_updated;
@@ -122,12 +142,7 @@ namespace coin {
             /**
              * The std::recursive_mutex.
              */
-            std::recursive_mutex mutex_;
-
-            /**
-             * The next transactions.
-             */
-            std::map<point_out, point_in> transactions_next_;
+            mutable std::recursive_mutex mutex_;
     };
     
 } // namespace coin

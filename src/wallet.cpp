@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -21,17 +21,23 @@
 #include <chrono>
 #include <future>
 #include <stdexcept>
+#include <thread>
 
 #include <boost/lexical_cast.hpp>
 
+#include <coin/account.hpp>
 #include <coin/accounting_entry.hpp>
 #include <coin/address.hpp>
 #include <coin/block_locator.hpp>
+#include <coin/block_merkle.hpp>
+#include <coin/chainblender.hpp>
 #include <coin/coin_control.hpp>
 #include <coin/constants.hpp>
 #include <coin/crypter.hpp>
 #include <coin/db_env.hpp>
 #include <coin/hash.hpp>
+#include <coin/incentive.hpp>
+#include <coin/incentive_manager.hpp>
 #include <coin/kernel.hpp>
 #include <coin/key_reserved.hpp>
 #include <coin/key_pool.hpp>
@@ -43,18 +49,37 @@
 #include <coin/time.hpp>
 #include <coin/tcp_connection_manager.hpp>
 #include <coin/wallet.hpp>
+#include <coin/zerotime_manager.hpp>
 
 using namespace coin;
 
-wallet::wallet(stack_impl & impl)
-    : m_wallet_version(feature_base)
+wallet::wallet()
+    : m_stack_impl(0)
+    , m_wallet_version(feature_base)
     , m_wallet_version_max(feature_base)
     , m_order_position_next(0)
+    , m_timestamp(0)
     , m_master_key_max_id(0)
-    , stack_impl_(impl)
-    , is_file_backed_(true)
+    , m_is_file_backed(true)
+    , timer_flush_(globals::instance().io_service())
     , resend_transactions_timer_(globals::instance().io_service())
-    , check_timer_(globals::instance().io_service())
+    , zerotime_lock_queue_timer_(globals::instance().io_service())
+    , time_last_resend_(0)
+{
+    // ...
+}
+
+wallet::wallet(stack_impl & impl)
+    : m_stack_impl(&impl)
+    , m_wallet_version(feature_base)
+    , m_wallet_version_max(feature_base)
+    , m_order_position_next(0)
+    , m_timestamp(0)
+    , m_master_key_max_id(0)
+    , m_is_file_backed(true)
+    , timer_flush_(globals::instance().io_service())
+    , resend_transactions_timer_(globals::instance().io_service())
+    , zerotime_lock_queue_timer_(globals::instance().io_service())
     , time_last_resend_(0)
 {
     // ...
@@ -63,64 +88,143 @@ wallet::wallet(stack_impl & impl)
 void wallet::start()
 {
     /**
-     * Start the check timer.
+     * Periodically flush.
      */
-    check_timer_.expires_from_now(std::chrono::seconds(900));
-    check_timer_.async_wait(globals::instance().strand().wrap(
-        std::bind(&wallet::check_tick, this,
+    timer_flush_.expires_from_now(std::chrono::seconds(8));
+    timer_flush_.async_wait(globals::instance().strand().wrap(
+        std::bind(&wallet::tick_flush, this,
         std::placeholders::_1))
     );
     
     /**
-     * Start the resend transactions timer.
+     * Start the timer after a random time interval.
      */
-    resend_transactions_timer_.expires_from_now(std::chrono::seconds(60));
+    resend_transactions_timer_.expires_from_now(
+        std::chrono::seconds(random::uint16_random_range(
+        5 * 60, 15 * 60))
+    );
     resend_transactions_timer_.async_wait(globals::instance().strand().wrap(
         std::bind(&wallet::resend_transactions_tick, this,
         std::placeholders::_1))
     );
+    
+    for (auto & i : m_address_book)
+    {
+        /**
+         * Allocate the info.
+         */
+        std::map<std::string, std::string> status;
+        
+        /**
+         * Set the type.
+         */
+        status["type"] = "wallet.address_book";
+
+        /**
+         * Set the value.
+         */
+        status["value"] = "new";
+        
+        /**
+         * Set the wallet.transaction.hash.
+         */
+        status["wallet.address_book.address"] =
+            address(i.first).to_string()
+        ;
+        
+        /**
+         * Set the wallet.transaction.hash.
+         */
+        status["wallet.address_book.name"] = i.second;
+        
+        if (m_stack_impl)
+        {
+            /**
+             * Callback on new or updated transaction.
+             */
+            m_stack_impl->get_status_manager()->insert(status);
+        }
+    }
 }
 
 void wallet::stop()
 {
+    timer_flush_.cancel();
     resend_transactions_timer_.cancel();
-    check_timer_.cancel();
+    zerotime_lock_queue_timer_.cancel();
 }
 
 void wallet::flush()
 {
     std::lock_guard<std::recursive_mutex> l1(mutex_);
     
-    auto reference_count = 0;
+    /**
+     * Make sure no other threads can access the db_env for this scope.
+     */
+    std::lock_guard<std::recursive_mutex> l2(db_env::mutex_DbEnv());
 
-    auto it = stack_impl::get_db_env()->file_use_counts().begin();
-
-    while (it != stack_impl::get_db_env()->file_use_counts().end())
+    if (stack_impl::get_db_env())
     {
-        reference_count += it->second;
+        auto start = std::chrono::system_clock::now();
         
-        it++;
-    }
+        auto reference_count = 0;
 
-    if (reference_count == 0)
-    {
-        auto it = stack_impl::get_db_env()->file_use_counts().find(
-            "wallet.dat"
-        );
-        
-        if (it != stack_impl::get_db_env()->file_use_counts().end())
+        auto it = stack_impl::get_db_env()->file_use_counts().begin();
+
+        while (it != stack_impl::get_db_env()->file_use_counts().end())
         {
-            log_info("Wallet is flushing to disk.");
-
-            stack_impl::get_db_env()->close_Db("wallet.dat");
+            reference_count += it->second;
             
-            stack_impl::get_db_env()->checkpoint_lsn("wallet.dat");
-
-            stack_impl::get_db_env()->file_use_counts().erase(it++);
-            
-            log_info("Wallet flushed to disk.");
+            it++;
         }
+
+        if (reference_count == 0)
+        {
+            auto it = stack_impl::get_db_env()->file_use_counts().find(
+                "wallet.dat"
+            );
+            
+            if (it != stack_impl::get_db_env()->file_use_counts().end())
+            {
+                log_info("Wallet is flushing to disk.");
+
+                stack_impl::get_db_env()->close_Db("wallet.dat");
+                
+                stack_impl::get_db_env()->checkpoint_lsn("wallet.dat");
+
+                stack_impl::get_db_env()->file_use_counts().erase(it++);
+                
+                log_info("Wallet flushed to disk.");
+            }
+        }
+        
+        std::chrono::duration<double> elapsed_seconds =
+            std::chrono::system_clock::now() - start
+        ;
+        
+        log_info(
+            "Wallet flush took " << elapsed_seconds.count() << " seconds."
+        );
     }
+}
+
+bool wallet::encrypt(const std::string & passphrase)
+{
+    if (passphrase.size() == 0)
+    {
+        log_error("Wallet failed to encrypt, empty passphrase.");
+        
+        return false;
+    }
+    
+    if (is_crypted())
+    {
+        log_error("Wallet failed to encrypt, already encrypted.");
+        
+        return false;
+    }
+    
+    return do_encrypt(passphrase);
 }
 
 bool wallet::unlock(const std::string & passphrase)
@@ -143,7 +247,7 @@ bool wallet::unlock(const std::string & passphrase)
             {
                 return false;
             }
-            
+
             if (c.decrypt(i.second.crypted_key(), master_key) == false)
             {
                 return false;
@@ -155,7 +259,137 @@ bool wallet::unlock(const std::string & passphrase)
             }
         }
     }
+
+    return false;
+}
+
+bool wallet::change_passphrase(
+    const std::string & passphrase_old, const std::string & passphrase_new
+    )
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
     
+    auto was_locked = is_locked();
+    
+    lock();
+    
+    /**
+     * The master key.
+     */
+    types::keying_material_t master_key;
+
+    /**
+     * Allocate the crypter.
+     */
+    crypter c;
+    
+    for (auto & i : m_master_keys)
+    {
+        if (
+            c.set_key_from_passphrase(passphrase_old, i.second.salt(),
+            i.second.derive_iterations(), i.second.derivation_method()) == false
+            )
+        {
+            return false;
+        }
+        
+        if (c.decrypt(i.second.crypted_key(), master_key) == false)
+        {
+            return false;
+        }
+        
+        if (key_store_crypto::unlock(master_key) == true)
+        {
+            /**
+             * Get the milliseconds since epoch.
+             */
+            auto time_start = std::chrono::duration_cast<
+                std::chrono::milliseconds> (
+                std::chrono::system_clock::now().time_since_epoch()
+            ).count();
+            
+            /**
+             * Set the key from the passphrase.
+             */
+            c.set_key_from_passphrase(
+                passphrase_new, i.second.salt(), 25000,
+                i.second.derivation_method()
+            );
+
+            /**
+             * Set the derive iterations.
+             */
+            i.second.set_derive_iterations(
+                2500000 / (static_cast<double> ((std::chrono::duration_cast<
+                std::chrono::milliseconds> (std::chrono::system_clock::now(
+                ).time_since_epoch()).count() - time_start)))
+            );
+
+            /**
+             * Set the start time.
+             */
+            time_start = std::chrono::duration_cast<
+                std::chrono::milliseconds> (
+                std::chrono::system_clock::now().time_since_epoch()
+            ).count();
+            
+            /**
+             * Set the key from the passphrase.
+             */
+            c.set_key_from_passphrase(
+                passphrase_new, i.second.salt(),
+                i.second.derive_iterations(),
+                i.second.derivation_method()
+            );
+
+            if (i.second.derive_iterations() < 25000)
+            {
+                i.second.set_derive_iterations(25000);
+            }
+            
+            log_debug(
+                "Wallet is encrypting with " <<
+                i.second.derive_iterations() << " derive iterations."
+            );
+
+            /**
+             * Set the key from the passphrase.
+             */
+            if (
+                c.set_key_from_passphrase(passphrase_new,
+                i.second.salt(), i.second.derive_iterations(),
+                i.second.derivation_method()) == false
+                )
+            {
+                return false;
+            }
+            
+            /**
+             * Encrypt the master key.
+             */
+            if (c.encrypt(master_key, i.second.crypted_key()) == false)
+            {
+                return false;
+            }
+
+            if (m_is_file_backed)
+            {
+                m_db_wallet_encryption = std::make_shared<db_wallet> (
+                    "wallet.dat"
+                );
+                
+                m_db_wallet_encryption->write_master_key(i.first, i.second);
+            }
+        
+            if (was_locked == true)
+            {
+                lock();
+            }
+            
+            return true;
+        }
+    }
+
     return false;
 }
 
@@ -173,7 +407,7 @@ key_public wallet::generate_new_key()
     /**
      * Check if the key can be compressed.
      */
-    bool compressed = can_support_feature(feature_comprpubkey);
+    auto compressed = can_support_feature(feature_comprpubkey);
 
     /**
      * Increase the uncertainty about the RNG state.
@@ -185,10 +419,90 @@ key_public wallet::generate_new_key()
      */
     key k;
     
-    /**
-     * Make the key.
-     */
-    k.make_new_key(compressed);
+    if (m_hd_configuration.id_key_master().is_empty() == false)
+    {
+        key key_child;
+
+        /**
+         * m/0'
+         */
+        hd_keychain key_m0;
+        
+        /**
+         * m/0'/0'
+         */
+        hd_keychain key_m00;
+        
+        /**
+         * m/0'/0'/n'
+         */
+        hd_keychain m_keym00n;
+ 
+        if (get_key(m_hd_configuration.id_key_master(), k) == false)
+        {
+            throw std::runtime_error(
+                "wallet::generate_new_key(): Key master not found"
+            );
+        }
+        else
+        {
+            /**
+             * :TODO: Make this an ivar.
+             */
+            static auto did_set_hd_key_master = false;
+            
+            if (did_set_hd_key_master == false)
+            {
+                did_set_hd_key_master = true;
+                
+                /**
+                 * Set the HD key master.
+                 */
+                set_hd_key_master(k, false, false);
+            }
+        }
+        
+        key_m0 = m_hd_keychain.get_child(0x80000000 | 0);
+
+        key_m00 = key_m0.get_child(0x80000000 | 0);
+        
+        do
+        {
+            std::string path = "m/0'/0'/" + std::to_string(
+                m_hd_configuration.index()) + "'"
+            ;
+            
+            log_info("Wallet, (HD) key path = " << path << ".");
+            
+            m_keym00n = key_m00.get_child(
+                0x80000000 | m_hd_configuration.index()
+            );
+            
+            key_child.set_secret(m_keym00n.privkey());
+
+            m_hd_configuration.set_index(m_hd_configuration.index() + 1);
+            
+        } while (have_key(key_child.get_public_key().get_id()) == true);
+        
+        k = key_child;
+
+        if (
+            db_wallet("wallet.dat").write_hd_configuration(
+            m_hd_configuration) == false
+            )
+        {
+            throw std::runtime_error(
+                "wallet::generate_new_key(): write_hd_configuration failed"
+            );
+        }
+    }
+    else
+    {
+        /**
+         * Make the key.
+         */
+        k.make_new_key(compressed);
+    }
 
     /**
      * Compressed public keys were introduced in version 0.6.0.
@@ -238,7 +552,7 @@ bool wallet::add_key(const key & val)
         return false;
     }
     
-    if (is_file_backed_ == false)
+    if (m_is_file_backed == false)
     {
         return true;
     }
@@ -264,7 +578,7 @@ bool wallet::add_crypted_key(
         return false;
     }
     
-    if (is_file_backed_ == false)
+    if (m_is_file_backed == false)
     {
         return true;
     }
@@ -305,7 +619,7 @@ bool wallet::add_c_script(const script & script_redeem)
         return false;
     }
     
-    if (is_file_backed_ == false)
+    if (m_is_file_backed == false)
     {
         return true;
     }
@@ -337,7 +651,7 @@ std::int64_t wallet::increment_order_position_next(
     }
     else
     {
-        db_wallet().write_orderposnext(m_order_position_next);
+        db_wallet("wallet.dat").write_orderposnext(m_order_position_next);
     }
     
     return ret;
@@ -347,7 +661,7 @@ bool wallet::new_key_pool()
 {
     std::lock_guard<std::recursive_mutex> l1(mutex_);
     
-    db_wallet wallet_db;
+    db_wallet wallet_db("wallet.dat");
     
     /**
      * Remove the old keys from the pool.
@@ -367,7 +681,15 @@ bool wallet::new_key_pool()
         /**
          * Get the number of keys.
          */
-        auto target_size = std::max(100, 0);
+        auto target_size = 0;
+        
+        if (m_stack_impl)
+        {
+            target_size =
+                std::max(
+                m_stack_impl->get_configuration().wallet_keypool_size(), 0)
+            ;
+        }
         
         for (int i = 0; i < target_size; i++)
         {
@@ -405,13 +727,21 @@ bool wallet::top_up_key_pool()
         return false;
     }
     
-    db_wallet wallet_db;
+    db_wallet wallet_db("wallet.dat");
 
     /**
      * Top up (off) the key pool.
      */
-    auto target_size = std::max(100, 0);
+    auto target_size = 0;
     
+    if (m_stack_impl)
+    {
+        target_size =
+            std::max(
+            m_stack_impl->get_configuration().wallet_keypool_size(), 0)
+        ;
+    }
+
     while (m_key_pool.size() < (target_size + 1))
     {
         std::int64_t end = 1;
@@ -432,7 +762,7 @@ bool wallet::top_up_key_pool()
     
         m_key_pool.insert(end);
         
-        log_debug(
+        log_info(
             "Wallet toping off key pool, added " << end <<
             ", size = " << m_key_pool.size() << "."
         );
@@ -464,7 +794,7 @@ void wallet::reserve_key_from_key_pool(
         return;
     }
     
-    db_wallet wallet_db;
+    db_wallet wallet_db("wallet.dat");
     
     index = *m_key_pool.begin();
     
@@ -485,6 +815,47 @@ void wallet::reserve_key_from_key_pool(
     }
     
     assert(keypool.get_key_public().is_valid());
+    
+    /**
+     * -printkeypool
+     */
+    log_none("Wallet reserved key " << index << " from pool.");
+}
+
+std::set<types::id_key_t> wallet::reserve_keys()
+{
+    std::set<types::id_key_t> ret;
+ 
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    db_wallet wallet_db("wallet.dat");
+    
+    for (auto & i : m_key_pool)
+    {
+        key_pool keypool;
+
+        if (wallet_db.read_pool(i, keypool) == false)
+        {
+            throw std::runtime_error(
+                "wallet::reserve_key_from_key_pool() : read failed"
+            );
+        }
+        
+        auto key_id = keypool.get_key_public().get_id();
+        
+        if (have_key(key_id) == false)
+        {
+            throw std::runtime_error(
+                "wallet::reserve_key_from_key_pool() : unknown key in key pool"
+            );
+        }
+        
+        assert(keypool.get_key_public().is_valid());
+        
+        ret.insert(key_id);
+    }
+
+    return ret;
 }
 
 void wallet::keep_key(const std::int64_t & index)
@@ -494,9 +865,9 @@ void wallet::keep_key(const std::int64_t & index)
     /**
      * Remove from key pool.
      */
-    if (is_file_backed_)
+    if (m_is_file_backed)
     {
-        db_wallet wallet_db;
+        db_wallet wallet_db("wallet.dat");
         
         wallet_db.erase_pool(index);
     }
@@ -512,6 +883,8 @@ void wallet::return_key(const std::int64_t & index)
      * Return to the key_pool.
      */
     m_key_pool.insert(index);
+
+    log_none("Wallet key pool return key " << index << ".");
 }
 
 bool wallet::get_key_from_pool(key_public & result, const bool & allow_reuse)
@@ -688,14 +1061,14 @@ bool wallet::is_change(const transaction_out & tx_out) const
 
 void wallet::set_best_chain(const block_locator & value)
 {
-    db_wallet().write_bestblock(value);
+    db_wallet("wallet.dat").write_bestblock(value);
 }
 
 db_wallet::error_t wallet::load_wallet(bool & first_run)
 {
     db_wallet::error_t ret = db_wallet::error_load_ok;
 
-    if (is_file_backed_ == false)
+    if (m_is_file_backed == false)
     {
         return ret;
     }
@@ -703,7 +1076,7 @@ db_wallet::error_t wallet::load_wallet(bool & first_run)
     {
         first_run = false;
         
-        ret = db_wallet("cr+").load(*this);
+        ret = db_wallet("wallet.dat", "cr+").load(*this);
         
         if (ret == db_wallet::error_need_rewrite)
         {
@@ -711,9 +1084,8 @@ db_wallet::error_t wallet::load_wallet(bool & first_run)
                 globals::instance().strand().wrap(
                 [this]()
             {
-                if (db::rewrite("\x04pool"))
+                if (db::rewrite("wallet.dat", "\x04pool"))
                 {
-
                     m_key_pool.clear();
                     
                     /**
@@ -762,7 +1134,15 @@ void wallet::on_transaction_updated(const sha256 & val)
          * Allocate the info.
          */
         std::map<std::string, std::string> status;
-        
+
+        /**
+         * Add the transaction_wallet values to the status.
+         */
+        for (auto & i : wtx.values())
+        {
+            status[i.first] = i.second;
+        }
+
         /**
          * Set the type.
          */
@@ -867,10 +1247,6 @@ void wallet::on_transaction_updated(const sha256 & val)
             
             std::int64_t credit = 0;
             
-            /**
-             * Since this is a coin base transaction we only add the first value
-             * from the first transaction out.
-             */
             for (auto & j : wtx.transactions_out())
             {
                 if (
@@ -880,7 +1256,15 @@ void wallet::on_transaction_updated(const sha256 & val)
                 {
                     credit += j.value();
                     
-                    break;
+                    /**
+                     * Since this is a coin base transaction we only add the
+                     * first value from the first transaction out except when
+                     * incentives are enabled (which will have many outputs).
+                     */
+                    if (globals::instance().is_incentive_enabled() == false)
+                    {
+                        break;
+                    }
                 }
             }
             
@@ -895,10 +1279,45 @@ void wallet::on_transaction_updated(const sha256 & val)
             status["wallet.transaction.type"] = "mined";
         }
     
+        if (m_stack_impl)
+        {
+            /**
+             * Callback on new or updated transaction.
+             */
+            m_stack_impl->get_status_manager()->insert(status);
+        }
+    }
+}
+
+void wallet::on_spv_transaction_updated(
+    const std::int32_t & height, const sha256 & hash_tx
+    )
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    /**
+     * Only notify UI if this transaction is in this wallet.
+     */
+    auto it = m_transactions.find(hash_tx);
+    
+    if (it != m_transactions.end())
+    {
+        transaction_wallet & wtx = it->second;
+        
         /**
-         * Callback on new or updated transaction.
+         * Set the (SPV) block height.
          */
-        stack_impl_.get_status_manager()->insert(status);
+        wtx.set_spv_block_height(height);
+        
+        /**
+         * Use regular callback now that values are set.
+         */
+        on_transaction_updated(hash_tx);
+        
+        /**
+         * Write the transaction to disk.
+         */
+        wtx.write_to_disk();
     }
 }
 
@@ -920,21 +1339,263 @@ bool wallet::erase_from_wallet(const sha256 & val) const
     
     if (m_transactions.erase(val) > 0)
     {
-        db_wallet().erase_tx(val);
+        db_wallet("wallet.dat").erase_tx(val);
     }
     
     return true;
 }
 
+void wallet::erase_transactions()
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    for (auto & i : m_transactions)
+    {
+        db_wallet("wallet.dat").erase_tx(i.first);
+    }
+   
+    m_transactions.clear();
+}
+
+void wallet::zerotime_lock(const sha256 & val)
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    auto it = m_transactions.find(val);
+    
+    if (it != m_transactions.end())
+    {
+        if (globals::instance().is_zerotime_enabled() == true)
+        {
+            log_info("Wallet is performing zerotime lock.");
+            
+            if (
+                it->second.get_depth_in_main_chain() <
+                transaction_wallet::confirmations
+                )
+            {
+                /**
+                 * Relay the zerotime_lock (if required).
+                 */
+                it->second.relay_wallet_zerotime_lock(
+                    m_stack_impl->get_tcp_connection_manager(),
+                    globals::instance().is_client_spv() ? false : true
+                );
+
+                /**
+                 * Vote for the ztlock if score allows.
+                 */
+                m_stack_impl->get_zerotime_manager()->vote(
+                    it->second.get_hash(), it->second.transactions_in()
+                );
+            }
+        }
+    }
+}
+
+bool wallet::chainblender_denominate(const std::int64_t & val)
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    auto ret = false;
+    
+    if (is_locked() == false)
+    {
+        /**
+         * Allocate a key_reserved.
+         */
+        key_reserved reserved_key(*this);
+        
+        /**
+         * Allocate an out to ourself.
+         */
+        script script_change;
+        
+        /**
+         * Reserve a new key/pair.
+         */
+        script_change.set_destination(
+            reserved_key.get_reserved_key().get_id()
+        );
+        
+        /**
+         * Allocate the wallet transaction.
+         */
+        transaction_wallet wtx;
+        
+        /**
+         * Get the amount remaining.
+         */
+        auto remaining = val;
+        
+        /**
+         * Allocate the transactions to send.
+         */
+        std::vector< std::pair<script, std::int64_t> > to_send;
+        
+        /**
+         * Get the denominations.
+         */
+        auto denominations = chainblender::instance().denominations();
+
+        /**
+         * Work backwards over the denominations.
+         */
+        auto it = denominations.rbegin();
+        
+        for (; it != denominations.rend(); ++it)
+        {
+            const auto & denomination = *it;
+            
+            auto outputs = 0;
+
+            /**
+             * Get the (on-chain + non-denominated) balance.
+             */
+            auto balance_on_chain_nondenominated =
+                get_on_chain_nondenominated_balance()
+            ;
+
+            /**
+             * Create the denominations.
+             */
+            while (
+                remaining - denomination >= 0 && outputs <= 8 &&
+                balance_on_chain_nondenominated > remaining
+                )
+            {
+                /**
+                 * Allocate another out to ourself.
+                 */
+                script script_change_new;
+                
+                /**
+                 * Reserve a new key/pair.
+                 */
+                script_change_new.set_destination(
+                    reserved_key.get_reserved_key().get_id()
+                );
+        
+                reserved_key.keep_key();
+                
+                outputs++;
+                
+                to_send.push_back(
+                    std::make_pair(script_change_new, denomination)
+                );
+                
+                remaining -= denomination;
+                
+                log_info(
+                    "Wallet chainblender denominate remaining = " <<
+                    remaining << "."
+                );
+            }
+            
+            if (remaining <= 0)
+            {
+                break;
+            }
+        }
+        
+        log_info(
+            "Wallet chainblender denominate remaining = " << remaining << "."
+        );
+        
+        std::int64_t required_fee = 0;
+        
+        /**
+         * Do not use ZeroTime.
+         */
+        auto use_zerotime = false;
+        
+        /**
+         * Initialize the filter with the denominations.
+         */
+        auto filter = denominations;
+        
+        /**
+         * Get the blended denominations.
+         */
+        auto denominations_blended =
+            chainblender::instance().denominations_blended()
+        ;
+        
+        /**
+         * Add blended denominations to the filter.
+         */
+        filter.insert(
+            denominations_blended.begin(), denominations_blended.end()
+        );
+        
+        /**
+         * Create the transaction.
+         */
+        auto success = create_transaction(
+            to_send, wtx, reserved_key, required_fee, filter, 0, use_zerotime,
+            false
+        );
+        
+        if (success)
+        {
+            /**
+             * Set that the transaction_wallet is chainblender denominated.
+             */
+            wtx.values()["denominated"] = "1";
+
+            /**
+             * Do not use ZeroTime for denominate operations.
+             */
+            auto use_zerotime = false;
+            
+            /**
+             * Commit the transaction.
+             */
+            auto ret_pair = commit_transaction(
+                wtx, reserved_key, use_zerotime
+            );
+            
+            if (ret_pair.first == true)
+            {
+                log_info(
+                    "Wallet chainblender created denominated transaction " <<
+                    wtx.get_hash().to_string().substr(0, 8) << "."
+                );
+                
+                ret = true;
+            }
+            else
+            {
+                log_error(
+                    "Wallet chainblender denominate (commit_transaction) "
+                    "failed, error = " << ret_pair.second << "."
+                );
+            }
+        }
+        else
+        {
+            log_error(
+                "Wallet chainblender denominate (create_transaction) failed."
+            );
+        }
+    }
+    else
+    {
+        log_error("Wallet chainblender denominate failed, wallet is locked.");
+    }
+
+    return ret;
+}
+
 std::int32_t wallet::scan_for_transactions(
-    const std::shared_ptr<block_index> & index_start, const bool & update
+    const block_index * index_start, const bool & update
     )
 {
     std::lock_guard<std::recursive_mutex> l1(mutex_);
     
     std::int32_t ret = 0;
     
-    auto index = index_start;
+    auto * index = index_start;
     
     while (index)
     {
@@ -958,6 +1619,8 @@ std::int32_t wallet::scan_for_transactions(
 
 void wallet::reaccept_wallet_transactions()
 {
+    assert(globals::instance().is_client_spv() == false);
+    
     std::lock_guard<std::recursive_mutex> l1(mutex_);
     
     db_tx tx_db("r");
@@ -1089,6 +1752,8 @@ void wallet::fix_spent_coins(
     const bool & check_only
     )
 {
+    assert(globals::instance().is_client_spv() == false);
+    
     std::lock_guard<std::recursive_mutex> l1(mutex_);
     
     mismatch_spent = 0;
@@ -1128,6 +1793,13 @@ void wallet::fix_spent_coins(
                 (tx_index.spent().size() <= n || tx_index.spent()[n].is_null())
                 )
             {
+                log_info(
+                    "Wallet, fix spent coins found lost coin " <<
+                    utility::format_money(i->transactions_out()[n].value()) <<
+                    ":" << i->get_hash().to_string() << "[" << n << "], " <<
+                    (check_only ? "repair not attempted" : "repairing") << "."
+                );
+                
                 mismatch_spent++;
                 
                 balance_in_question += i->transactions_out()[n].value();
@@ -1145,6 +1817,13 @@ void wallet::fix_spent_coins(
                 tx_index.spent()[n].is_null() == false)
                 )
             {
+                log_info(
+                    "Wallet, fix spent coins found spent coin " <<
+                    utility::format_money(i->transactions_out()[n].value()) <<
+                    i->get_hash().to_string() << "[" << n << "], " <<
+                    (check_only ? "repair not attempted" : "repairing") << "."
+                );
+                
                 mismatch_spent++;
                 
                 balance_in_question += i->transactions_out()[n].value();
@@ -1179,8 +1858,7 @@ void wallet::disable_transaction(const transaction & tx) const
             
             if (
                 i.previous_out().n() < prev.transactions_out().size() &&
-                is_mine(prev.transactions_out()[i.previous_out().n()]
-                )
+                is_mine(prev.transactions_out()[i.previous_out().n()])
                 )
             {
                 prev.mark_unspent(i.previous_out().n());
@@ -1232,7 +1910,7 @@ wallet::tx_items_t wallet::ordered_tx_items(
     std::list<accounting_entry> & entries, const std::string & account
     ) const
 {
-    db_wallet wallet_db;
+    db_wallet wallet_db("wallet.dat");
 
     /**
      * Get all transaction_wallet's and account_entry's into a sorted-by-order
@@ -1240,6 +1918,11 @@ wallet::tx_items_t wallet::ordered_tx_items(
      */
     tx_items_t tx_ordered;
 
+    /**
+     * Maintaining indices in the database of (account, time) --> txid and
+     * (account, time) --> acentry would make this much faster for applications
+     * that do this a lot.
+     */
     for (auto it = m_transactions.begin(); it != m_transactions.end(); ++it)
     {
         auto wtx = &it->second;
@@ -1263,6 +1946,13 @@ wallet::tx_items_t wallet::ordered_tx_items(
 
 void wallet::update_spent(const transaction & tx) const
 {
+    /**
+     * Anytime a signature is successfully verified, it's proof the out point
+     * is spent. Update the wallet spent flag if it doesn't know due to
+     * wallet.dat being restored from backup or the user making copies of
+     * wallet.dat.
+     */
+
     std::lock_guard<std::recursive_mutex> l1(mutex_);
     
     for (auto & i : tx.transactions_in())
@@ -1272,19 +1962,30 @@ void wallet::update_spent(const transaction & tx) const
         if (it != m_transactions.end())
         {
             auto & wtx = it->second;
-            
+
             if (i.previous_out().n() >= wtx.transactions_out().size())
             {
-                log_error(
+                /**
+                 * This can happen because of chainblended transactions and
+                 * is ok.
+                 */
+                log_debug(
                     "Wallet, update spent failed, bad wallet transaction " <<
                     wtx.get_hash().to_string().substr(0, 10) << "."
                 );
             }
             else if (
-                wtx.is_spent(i.previous_out().n()) &&
-                is_mine(wtx.transactions_out()[i.previous_out().n()]) == false
+                wtx.is_spent(i.previous_out().n()) == false &&
+                is_mine(wtx.transactions_out()[i.previous_out().n()]) == true
                 )
             {
+                log_debug(
+                    "Wallet, update mark spent coin " <<
+                    utility::format_money(wtx.get_credit()) << ":" <<
+                    wtx.get_hash().to_string().substr(0, 10) <<
+                    "."
+                );
+
                 wtx.mark_spent(i.previous_out().n());
                 
                 wtx.write_to_disk();
@@ -1308,13 +2009,16 @@ void wallet::update_spent(const transaction & tx) const
                  * Set the wallet.transaction.hash.
                  */
                 status["wallet.transaction.hash"] =
-                    i.previous_out().to_string()
+                    wtx.get_hash().to_string()
                 ;
                 
-                /**
-                 * Callback on new or updated transaction.
-                 */
-                stack_impl_.get_status_manager()->insert(status);
+                if (m_stack_impl)
+                {
+                    /**
+                     * Callback on new or updated transaction.
+                     */
+                    m_stack_impl->get_status_manager()->insert(status);
+                }
             }
         }
     }
@@ -1352,12 +2056,19 @@ bool wallet::add_to_wallet(const transaction_wallet & wtx_in)
      
         if (wtx.block_hash() != 0)
         {
-            if (globals::instance().block_indexes().count(wtx_in.block_hash()))
+            if (
+                globals::instance().block_indexes().count(
+                wtx_in.block_hash()) > 0
+                )
             {
                 auto latest_now = wtx.time_received();
                 
                 std::uint32_t latest_entry = 0;
 
+                /**
+                 * Tolerate times up to the last timestamp in the wallet not
+                 * more than 5 minutes into the future.
+                 */
                 std::int64_t latest_tolerated = latest_now + 300;
                 
                 std::list<accounting_entry> acentries;
@@ -1460,6 +2171,12 @@ bool wallet::add_to_wallet(const transaction_wallet & wtx_in)
         
         updated |= wtx.update_spent(wtx_in.spent());
     }
+    
+    log_debug(
+        "Wallet, add to, incoming = " <<
+        wtx_in.get_hash().to_string().substr(0, 10) <<
+        (inserted_new ? " new" : " ") << (updated ? "update" : "") << "."
+    );
 
     /**
      * Write to disk.
@@ -1472,153 +2189,207 @@ bool wallet::add_to_wallet(const transaction_wallet & wtx_in)
         }
     }
     
+#if (defined COIN_USE_GUI && COIN_USE_GUI)
+    // ...
+#else
+        /**
+         * If default receiving address gets used, replace it with a new one.
+         */
+        script script_default_key;
+    
+        script_default_key.set_destination(m_key_public_default.get_id());
+    
+        for (auto & i : wtx.transactions_out())
+        {
+            if (i.script_public_key() == script_default_key)
+            {
+                key_public new_default_key;
+                
+                if (get_key_from_pool(new_default_key, false))
+                {
+                    set_key_public_default(new_default_key, true);
+                    
+                    set_address_book_name(m_key_public_default.get_id(), "");
+                }
+            }
+        }
+#endif // COIN_USE_GUI
+    
+    /**
+     * Since add_to_wallet is called directly for self-originating
+     * transactions, check for consumption of our own coins.
+     */
     update_spent(wtx);
 
-    globals::instance().io_service().post(globals::instance().strand().wrap(
-        [this, wtx, updated]()
+    /**
+     * Allocate the info.
+     */
+    std::map<std::string, std::string> status;
+
+    /**
+     * Add the transaction_wallet values to the status.
+     */
+    for (auto & i : wtx.values())
+    {
+        status[i.first] = i.second;
+    }
+
+    /**
+     * Set the type.
+     */
+    status["type"] = "wallet.transaction";
+
+    /**
+     * Set the value.
+     */
+    status["value"] = (updated ? "updated" : "new");
+   
+    /**
+     * Set the wallet.transaction.is_from_me.
+     */
+    status["wallet.transaction.is_from_me"] =
+        std::to_string(wtx.is_from_me())
+    ;
+    
+    /**
+     * Set the wallet.transaction.hash.
+     */
+    status["wallet.transaction.hash"] = wtx.get_hash().to_string();
+    
+    /**
+     * Set the wallet.transaction.in_main_chain.
+     */
+    status["wallet.transaction.in_main_chain"] = std::to_string(
+        wtx.is_in_main_chain()
+    );
+    
+    /**
+     * Set the wallet.transaction.confirmations.
+     */
+    status["wallet.transaction.confirmations"] =
+        std::to_string(wtx.get_depth_in_main_chain())
+    ;
+    
+    /**
+     * Set the wallet.transaction.confirmed.
+     */
+    status["wallet.transaction.confirmed"] =
+        std::to_string(wtx.is_confirmed())
+    ;
+    
+    /**
+     * Set the wallet.transaction.credit.
+     */
+    status["wallet.transaction.credit"] =
+        std::to_string(wtx.get_credit(true))
+    ;
+    
+    /**
+     * Set the wallet.transaction.debit.
+     */
+    status["wallet.transaction.debit"] = std::to_string(wtx.get_debit());
+    
+    /**
+     * Set the wallet.transaction.net.
+     */
+    status["wallet.transaction.net"] =
+        std::to_string(wtx.get_credit(true) - wtx.get_debit())
+    ;
+    
+    /**
+     * Set the wallet.transaction.time.
+     */
+    status["wallet.transaction.time"] = std::to_string(wtx.time());
+    
+    if (wtx.is_coin_stake())
     {
         /**
-         * Allocate the info.
+         * Set the wallet.transaction.coin_stake.
          */
-        std::map<std::string, std::string> status;
-        
-        /**
-         * Set the type.
-         */
-        status["type"] = "wallet.transaction";
-
-        /**
-         * Set the value.
-         */
-        status["value"] = (updated ? "updated" : "new");
-       
-        /**
-         * Set the wallet.transaction.is_from_me.
-         */
-        status["wallet.transaction.is_from_me"] =
-            std::to_string(wtx.is_from_me())
-        ;
-        
-        /**
-         * Set the wallet.transaction.hash.
-         */
-        status["wallet.transaction.hash"] = wtx.get_hash().to_string();
-        
-        /**
-         * Set the wallet.transaction.in_main_chain.
-         */
-        status["wallet.transaction.in_main_chain"] = std::to_string(
-            wtx.is_in_main_chain()
-        );
-        
-        /**
-         * Set the wallet.transaction.confirmations.
-         */
-        status["wallet.transaction.confirmations"] =
-            std::to_string(wtx.get_depth_in_main_chain())
-        ;
-        
-        /**
-         * Set the wallet.transaction.confirmed.
-         */
-        status["wallet.transaction.confirmed"] =
-            std::to_string(wtx.is_confirmed())
-        ;
+        status["wallet.transaction.coin_stake"] = "1";
         
         /**
          * Set the wallet.transaction.credit.
          */
         status["wallet.transaction.credit"] =
-            std::to_string(wtx.get_credit(true))
+            std::to_string(-wtx.get_debit())
         ;
         
         /**
-         * Set the wallet.transaction.debit.
+         * Set the wallet.transaction.credit.
          */
-        status["wallet.transaction.debit"] = std::to_string(wtx.get_debit());
+        status["wallet.transaction.value_out"] = std::to_string(
+            wtx.get_value_out()
+        );
         
         /**
-         * Set the wallet.transaction.net.
+         * Set the wallet.transaction.type.
          */
-        status["wallet.transaction.net"] =
-            std::to_string(wtx.get_credit(true) - wtx.get_debit())
-        ;
+        status["wallet.transaction.type"] = "stake";
+    }
+    else if (wtx.is_coin_base())
+    {
+        /**
+         * Set the wallet.transaction.coin_base.
+         */
+        status["wallet.transaction.coin_base"] = "1";
+        
+        std::int64_t credit = 0;
         
         /**
-         * Set the wallet.transaction.time.
+         * Since this is a coin base transaction we only add the first value
+         * from the first transaction out.
          */
-        status["wallet.transaction.time"] = std::to_string(wtx.time());
-        
-        if (wtx.is_coin_stake())
+        for (auto & j : wtx.transactions_out())
         {
-            /**
-             * Set the wallet.transaction.coin_stake.
-             */
-            status["wallet.transaction.coin_stake"] = "1";
-            
-            /**
-             * Set the wallet.transaction.credit.
-             */
-            status["wallet.transaction.credit"] =
-                std::to_string(-wtx.get_debit())
-            ;
-            
-            /**
-             * Set the wallet.transaction.credit.
-             */
-            status["wallet.transaction.value_out"] = std::to_string(
-                wtx.get_value_out()
-            );
-            
-            /**
-             * Set the wallet.transaction.type.
-             */
-            status["wallet.transaction.type"] = "stake";
-        }
-        else if (wtx.is_coin_base())
-        {
-            /**
-             * Set the wallet.transaction.coin_base.
-             */
-            status["wallet.transaction.coin_base"] = "1";
-            
-            std::int64_t credit = 0;
-            
-            /**
-             * Since this is a coin base transaction we only add the first value
-             * from the first transaction out.
-             */
-            for (auto & j : wtx.transactions_out())
+            if (
+                globals::instance().wallet_main(
+                )->is_mine(j)
+                )
             {
-                if (
-                    globals::instance().wallet_main(
-                    )->is_mine(j)
-                    )
-                {
-                    credit += j.value();
-                    
-                    break;
-                }
+                credit += j.value();
+                
+                break;
             }
-            
-            /**
-             * Set the wallet.transaction.credit.
-             */
-            status["wallet.transaction.credit"] = std::to_string(credit);
-            
-            /**
-             * Set the wallet.transaction.type.
-             */
-            status["wallet.transaction.type"] = "mined";
         }
-            
+        
+        /**
+         * Set the wallet.transaction.credit.
+         */
+        status["wallet.transaction.credit"] = std::to_string(credit);
+        
+        /**
+         * Set the wallet.transaction.type.
+         */
+        status["wallet.transaction.type"] = "mined";
+    }
+    
+    if (m_stack_impl)
+    {
         /**
          * Callback on new or updated transaction.
          */
-        stack_impl_.get_status_manager()->insert(status);
-     }));
+        m_stack_impl->get_status_manager()->insert(status);
+    }
+    
+    /**
+     * Notify an external script when a wallet transaction comes in or is
+     * updated.
+     * Call -walletnotify and run command replacing %s with
+     * wtx_in.get_hash().to_string().
+     */
     
     return true;
+}
+
+void wallet::mark_dirty()
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    for (auto & i : m_transactions)
+    {
+        i.second.mark_dirty();
+    }
 }
 
 bool wallet::set_address_book_name(
@@ -1643,12 +2414,51 @@ bool wallet::set_address_book_name(
     
     m_address_book[addr] = name;
     
-    if (is_file_backed_ == false)
+    /**
+     * Callback that the address book has changed.
+     */
+    
+    /**
+     * Allocate the info.
+     */
+    std::map<std::string, std::string> status;
+    
+    /**
+     * Set the type.
+     */
+    status["type"] = "wallet.address_book";
+
+    /**
+     * Set the value.
+     */
+    status["value"] = "new";
+    
+    /**
+     * Set the wallet.transaction.hash.
+     */
+    status["wallet.address_book.address"] =
+        address(addr).to_string()
+    ;
+    
+    /**
+     * Set the wallet.transaction.hash.
+     */
+    status["wallet.address_book.name"] = name;
+    
+    if (m_stack_impl)
+    {
+        /**
+         * Callback on new or updated transaction.
+         */
+        m_stack_impl->get_status_manager()->insert(status);
+    }
+    
+    if (m_is_file_backed == false)
     {
         return false;
     }
     
-    return db_wallet().write_name(address(addr).to_string(), name);
+    return db_wallet("wallet.dat").write_name(address(addr).to_string(), name);
 }
 
 bool wallet::set_key_public_default(
@@ -1659,9 +2469,9 @@ bool wallet::set_key_public_default(
     
     if (write_to_disk)
     {
-        if (is_file_backed_)
+        if (m_is_file_backed)
         {
-            if (db_wallet().write_defaultkey(value) == false)
+            if (db_wallet("wallet.dat").write_defaultkey(value) == false)
             {
                 return false;
             }
@@ -1708,6 +2518,11 @@ const std::uint32_t & wallet::master_key_max_id() const
     return m_master_key_max_id;
 }
 
+const bool & wallet::is_file_backed() const
+{
+    return m_is_file_backed;
+}
+
 bool wallet::set_min_version(
     feature_t version, db_wallet * ptr_db_wallet,
     const bool & explicit_upgrade
@@ -1736,10 +2551,11 @@ bool wallet::set_min_version(
         m_wallet_version_max = version;
     }
     
-    if (is_file_backed_)
+    if (m_is_file_backed)
     {
         auto ptr =
-            ptr_db_wallet ? ptr_db_wallet : std::make_shared<db_wallet> ().get()
+            ptr_db_wallet ?
+            ptr_db_wallet : std::make_shared<db_wallet> ("wallet.dat").get()
         ;
         
         if (m_wallet_version > 40000)
@@ -1791,6 +2607,85 @@ std::int64_t wallet::get_balance() const
         }
     }
 
+    return ret;
+}
+
+std::int64_t wallet::get_on_chain_balance() const
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    std::int64_t ret = 0;
+
+    for (auto & i : m_transactions)
+    {
+        const auto & coin = i.second;
+        
+        if (coin.get_depth_in_main_chain(false) == 0)
+        {
+            continue;
+        }
+        
+        if (coin.is_final() && coin.is_confirmed())
+        {
+            ret += coin.get_available_credit();
+        }
+    }
+    
+    return ret;
+}
+
+std::int64_t wallet::get_on_chain_nondenominated_balance() const
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    return get_on_chain_balance() - get_on_chain_denominated_balance();
+}
+
+std::int64_t wallet::get_on_chain_denominated_balance() const
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    std::int64_t ret = 0;
+
+    for (auto & i : m_transactions)
+    {
+        const auto & coin = i.second;
+        
+        if (coin.get_depth_in_main_chain(false) == 0)
+        {
+            continue;
+        }
+
+        if (coin.is_final() && coin.is_confirmed())
+        {
+            ret += coin.get_available_denominated_credit();
+        }
+    }
+    
+    return ret;
+}
+
+std::int64_t wallet::get_on_chain_blended_balance() const
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    std::int64_t ret = 0;
+
+    for (auto & i : m_transactions)
+    {
+        const auto & coin = i.second;
+        
+        if (coin.get_depth_in_main_chain(false) == 0)
+        {
+            continue;
+        }
+
+        if (coin.is_final() && coin.is_confirmed())
+        {
+            ret += coin.get_available_chainblended_credit();
+        }
+    }
+    
     return ret;
 }
 
@@ -1882,12 +2777,18 @@ bool wallet::select_coins(
     const std::uint32_t & spend_time,
     std::set< std::pair<transaction_wallet,
     std::uint32_t> > & coins_out, std::int64_t & value_out,
-    const std::shared_ptr<coin_control> & control
+    const std::set<std::int64_t> & filter,
+    const std::shared_ptr<coin_control> & control,
+    const bool & use_zerotime, const bool & use_chainblended,
+    const bool & use_only_chainblended
     ) const
 {
     std::vector<output> coins;
     
-    available_coins(coins, true, control);
+    available_coins(
+        coins, true, filter, control, use_zerotime, use_chainblended,
+        use_only_chainblended
+    );
 
     if (control && control->has_selected())
     {
@@ -1918,7 +2819,9 @@ bool wallet::select_coins(
 bool wallet::create_transaction(
     const std::vector< std::pair<script, std::int64_t> > & scripts,
     transaction_wallet & tx_new, key_reserved & reserved_key,
-    std::int64_t & fee_out, const std::shared_ptr<coin_control> & control
+    std::int64_t & fee_out, const std::set<std::int64_t> & filter,
+    const std::shared_ptr<coin_control> & control, const bool & use_zerotime,
+    const bool & use_chainblended, const bool & use_only_chainblended
     )
 {
     std::int64_t value = 0;
@@ -1945,9 +2848,24 @@ bool wallet::create_transaction(
         return false;
     }
     
+    /**
+     * Bind the new transaction to the wallet.
+     */
     tx_new.bind_wallet(*this);
+
+    std::unique_ptr<db_tx> tx_db;
     
-    db_tx tx_db("r");
+    /**
+     * (SPV) clients do not maintain a transaction database.
+     */
+    if (globals::instance().is_client_spv() == true)
+    {
+        // ...
+    }
+    else
+    {
+        tx_db.reset(new db_tx("r"));
+    }
     
     fee_out = globals::instance().transaction_fee();
     
@@ -1983,13 +2901,15 @@ bool wallet::create_transaction(
         > coins;
         
         std::int64_t value_in = 0;
-        
+
         if (
             select_coins(total_value, tx_new.time(),
-            coins, value_in, control) == false
+            coins, value_in, filter, control, use_zerotime, use_chainblended,
+            use_only_chainblended
+            ) == false
             )
         {
-            log_debug(
+            log_error(
                 "Wallet, create transaction failed, select coins failed."
             );
 
@@ -2130,7 +3050,7 @@ bool wallet::create_transaction(
         /**
          * Make sure the transaction is not too big.
          */
-        if (len >= constants::max_block_size_gen / 5)
+        if (len > transaction::maxmimum_length / 3)
         {
             log_debug("Wallet, create transaction failed, too big.");
             
@@ -2164,7 +3084,14 @@ bool wallet::create_transaction(
         /**
          * Add the supporting transactions.
          */
-        tx_new.add_supporting_transactions(tx_db);
+        if (globals::instance().is_client_spv() == true)
+        {
+            tx_new.spv_add_supporting_transactions();
+        }
+        else
+        {
+            tx_new.add_supporting_transactions(*tx_db);
+        }
         
         /**
          * Set the time received is the same time as the transaction.
@@ -2180,18 +3107,42 @@ bool wallet::create_transaction(
 bool wallet::create_transaction(
     const script & script_pub_key, const std::int64_t & value,
     transaction_wallet & tx_new, key_reserved & reserved_key,
-    std::int64_t & fee_out, const std::shared_ptr<coin_control> & control
+    std::int64_t & fee_out, const std::set<std::int64_t> & filter,
+    const std::shared_ptr<coin_control> & control, const bool & use_zerotime,
+    const bool & use_chainblended, const bool & use_only_chainblended
     )
 {
     std::vector< std::pair<script, std::int64_t> > scripts;
     
     scripts.push_back(std::make_pair(script_pub_key, value));
 
-    return create_transaction(scripts, tx_new, reserved_key, fee_out, control);
+    return create_transaction(
+        scripts, tx_new, reserved_key, fee_out, filter, control, use_zerotime,
+        use_chainblended, use_only_chainblended
+    );
 }
 
-bool wallet::commit_transaction(
-    transaction_wallet & wtx_new, key_reserved & reserve_key
+bool wallet::get_transaction(
+    const sha256 & hash_tx, transaction_wallet & wtx_out
+    )
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    auto it = m_transactions.find(hash_tx);
+
+    if (it != m_transactions.end())
+    {
+        wtx_out = it->second;
+        
+        return true;
+    }
+
+    return false;
+}
+
+std::pair<bool, std::string> wallet::commit_transaction(
+    transaction_wallet & wtx_new, key_reserved & reserve_key,
+    const bool & use_zerotime
     )
 {
     std::lock_guard<std::recursive_mutex> l1(mutex_);
@@ -2204,207 +3155,279 @@ bool wallet::commit_transaction(
      * Allocate the db_wallet.
      */
     std::unique_ptr<db_wallet> unused(
-        is_file_backed_ ? new db_wallet("r") : 0
+        m_is_file_backed ? new db_wallet("wallet.dat", "r") : 0
     );
 
     /**
-     * Take a key/pair from key pool so it won't be used again.
+     * Try to accept it into the memory pool.
      */
-    reserve_key.keep_key();
+    auto ret = std::make_pair(false, std::string());
 
     /**
-     * Add transaction to wallet.
+     * SPV client nodes do not use a transaction_pool.
      */
-    add_to_wallet(wtx_new);
-
-    /**
-     * Mark old coins as spent.
-     */
-    for (auto & i : wtx_new.transactions_in())
+    if (globals::instance().is_client_spv() == true)
     {
-        transaction_wallet & tx = m_transactions[i.previous_out().get_hash()];
-        
-        /**
-         * Bind the wallet.
-         */
-        tx.bind_wallet(*this);
-        
-        /**
-         * Mark spent.
-         */
-        tx.mark_spent(i.previous_out().n());
-        
-        /**
-         * Write the transaction to disk.
-         */
-        tx.write_to_disk();
-        
-        /**
-         * Allocate the status.
-         */
-        std::map<std::string, std::string> status;
-        
-        /**
-         * Set the status type.
-         */
-        status["type"] = "wallet.transaction";
-        
-        /**
-         * Set the status value.
-         */
-        status["value"] = "updated";
-
-        /**
-         * Set the wallet.transaction.hash.
-         */
-        status["wallet.transaction.hash"] = tx.get_hash().to_string();
-
-        /**
-         * Set the wallet.transaction.in_main_chain.
-         */
-        status["wallet.transaction.in_main_chain"] = std::to_string(
-            tx.is_in_main_chain()
-        );
-        
-        /**
-         * Set the wallet.transaction.is_from_me.
-         */
-        status["wallet.transaction.is_from_me"] =
-            std::to_string(tx.is_from_me())
-        ;
-        
-        /**
-         * Set the wallet.transaction.confirmations.
-         */
-        status["wallet.transaction.confirmations"] =
-            std::to_string(tx.get_depth_in_main_chain())
-        ;
-        
-        /**
-         * Set the wallet.transaction.confirmed.
-         */
-        status["wallet.transaction.confirmed"] =
-            std::to_string(tx.is_confirmed())
-        ;
-        
-        /**
-         * Set the wallet.transaction.credit.
-         */
-        status["wallet.transaction.credit"] = std::to_string(
-            tx.get_credit(true)
-        );
-
-        /**
-         * Set the wallet.transaction.debit.
-         */
-        status["wallet.transaction.debit"] =
-            std::to_string(tx.get_debit())
-        ;
-        
-        /**
-         * Set the wallet.transaction.net.
-         */
-        status["wallet.transaction.net"] =
-            std::to_string(tx.get_credit(true) - tx.get_debit())
-        ;
-
-        /**
-         * Set the wallet.transaction.time.
-         */
-        status["wallet.transaction.time"] = std::to_string(tx.time());
-
-        if (tx.is_coin_stake())
-        {
-            /**
-             * Set the wallet.transaction.coin_stake.
-             */
-            status["wallet.transaction.coin_stake"] = "1";
-            
-            /**
-             * Set the wallet.transaction.credit.
-             */
-            status["wallet.transaction.credit"] =
-                std::to_string(-tx.get_debit())
-            ;
-        }
-        else if (tx.is_coin_base())
-        {
-            /**
-             * Set the wallet.transaction.coin_base.
-             */
-            status["wallet.transaction.coin_base"] = "1";
-            
-            std::int64_t credit = 0;
-            
-            /**
-             * Since this is a coin base transaction we only add the first value
-             * from the first transaction out.
-             */
-            for (auto & j : tx.transactions_out())
-            {
-                if (
-                    globals::instance().wallet_main(
-                    )->is_mine(j)
-                    )
-                {
-                    credit += j.value();
-                    
-                    break;
-                }
-            }
-            
-            /**
-             * Set the wallet.transaction.credit.
-             */
-            status["wallet.transaction.credit"] = std::to_string(credit);
-            
-            /**
-             * Set the wallet.transaction.type.
-             */
-            status["wallet.transaction.type"] = "mined";
-        }
-        
-        /**
-         * Callback
-         */
-        stack_impl_.get_status_manager()->insert(status);
+        ret = std::make_pair(true, std::string());
     }
-    
-    if (is_file_backed_)
+    else
     {
-        /**
-         * Deallocate
-         */
-        unused.reset();
+        ret = wtx_new.accept_to_memory_pool();
     }
-    
-    /**
-     * Track how many getdata requests our transaction gets.
-     */
-    m_request_counts[wtx_new.get_hash()] = 0;
 
     /**
      * Accept to the transaction_pool.
      */
-    if (wtx_new.accept_to_memory_pool() == false)
+    if (ret.first == false)
     {
         /**
          * The transaction has been signed and recorded, something bad happened.
          */
-        
         log_error(
             "Wallet, commit transaction failed, transaction is not valid."
         );
+
+        return std::make_pair(false, ret.second);
+    }
+    else
+    {
+        /**
+         * Take a key/pair from key pool so it won't be used again.
+         */
+        reserve_key.keep_key();
+
+        /**
+         * Add transaction to wallet.
+         */
+        add_to_wallet(wtx_new);
         
-        return false;
+        /**
+         * Mark old coins as spent.
+         */
+        for (auto & i : wtx_new.transactions_in())
+        {
+            transaction_wallet & wtx = m_transactions[
+                i.previous_out().get_hash()]
+            ;
+            
+            /**
+             * Bind the wallet.
+             */
+            wtx.bind_wallet(*this);
+            
+            /**
+             * Mark spent.
+             */
+            if (wtx.mark_spent(i.previous_out().n()) == true)
+            {
+                /**
+                 * Write the transaction to disk.
+                 */
+                wtx.write_to_disk();
+                
+                /**
+                 * Allocate the status.
+                 */
+                std::map<std::string, std::string> status;
+
+                /**
+                 * Add the transaction_wallet values to the status.
+                 */
+                for (auto & j : wtx.values())
+                {
+                    status[j.first] = j.second;
+                }
+
+                /**
+                 * Set the status type.
+                 */
+                status["type"] = "wallet.transaction";
+                
+                /**
+                 * Set the status value.
+                 */
+                status["value"] = "updated";
+
+                /**
+                 * Set the wallet.transaction.hash.
+                 */
+                status["wallet.transaction.hash"] = wtx.get_hash().to_string();
+
+                /**
+                 * Set the wallet.transaction.in_main_chain.
+                 */
+                status["wallet.transaction.in_main_chain"] = std::to_string(
+                    wtx.is_in_main_chain()
+                );
+                
+                /**
+                 * Set the wallet.transaction.is_from_me.
+                 */
+                status["wallet.transaction.is_from_me"] =
+                    std::to_string(wtx.is_from_me())
+                ;
+                
+                /**
+                 * Set the wallet.transaction.confirmations.
+                 */
+                status["wallet.transaction.confirmations"] =
+                    std::to_string(wtx.get_depth_in_main_chain())
+                ;
+                
+                /**
+                 * Set the wallet.transaction.confirmed.
+                 */
+                status["wallet.transaction.confirmed"] =
+                    std::to_string(wtx.is_confirmed())
+                ;
+                
+                /**
+                 * Set the wallet.transaction.credit.
+                 */
+                status["wallet.transaction.credit"] = std::to_string(
+                    wtx.get_credit(true)
+                );
+
+                /**
+                 * Set the wallet.transaction.debit.
+                 */
+                status["wallet.transaction.debit"] =
+                    std::to_string(wtx.get_debit())
+                ;
+                
+                /**
+                 * Set the wallet.transaction.net.
+                 */
+                status["wallet.transaction.net"] =
+                    std::to_string(wtx.get_credit(true) - wtx.get_debit())
+                ;
+
+                /**
+                 * Set the wallet.transaction.time.
+                 */
+                status["wallet.transaction.time"] = std::to_string(wtx.time());
+
+                if (wtx.is_coin_stake())
+                {
+                    /**
+                     * Set the wallet.transaction.coin_stake.
+                     */
+                    status["wallet.transaction.coin_stake"] = "1";
+                    
+                    /**
+                     * Set the wallet.transaction.credit.
+                     */
+                    status["wallet.transaction.credit"] =
+                        std::to_string(-wtx.get_debit())
+                    ;
+                }
+                else if (wtx.is_coin_base())
+                {
+                    /**
+                     * Set the wallet.transaction.coin_base.
+                     */
+                    status["wallet.transaction.coin_base"] = "1";
+                    
+                    std::int64_t credit = 0;
+                    
+                    /**
+                     * Since this is a coin base transaction we only add the
+                     * first value from the first transaction out.
+                     */
+                    for (auto & j : wtx.transactions_out())
+                    {
+                        if (
+                            globals::instance().wallet_main(
+                            )->is_mine(j)
+                            )
+                        {
+                            credit += j.value();
+                            
+                            break;
+                        }
+                    }
+                    
+                    /**
+                     * Set the wallet.transaction.credit.
+                     */
+                    status["wallet.transaction.credit"] =
+                        std::to_string(credit)
+                    ;
+                    
+                    /**
+                     * Set the wallet.transaction.type.
+                     */
+                    status["wallet.transaction.type"] = "mined";
+                }
+                
+                if (m_stack_impl)
+                {
+                    /**
+                     * Callback
+                     */
+                    m_stack_impl->get_status_manager()->insert(status);
+                }
+            }
+        }
+        
+        if (m_is_file_backed)
+        {
+            /**
+             * Deallocate
+             */
+            unused.reset();
+        }
+        
+        /**
+         * Track how many getdata requests our transaction gets.
+         */
+        m_request_counts[wtx_new.get_hash()] = 0;
     }
     
-    /**
-     * Relay the wallet transaction.
-     */
-    wtx_new.relay_wallet_transaction(stack_impl_.get_tcp_connection_manager());
-
-    return true;
+    if (m_stack_impl)
+    {
+        /**
+         * Relay the wallet transaction.
+         */
+        if (globals::instance().is_client_spv() == true)
+        {
+            wtx_new.spv_relay_wallet_transaction(
+                m_stack_impl->get_tcp_connection_manager()
+            );
+        }
+        else
+        {
+            wtx_new.relay_wallet_transaction(
+                m_stack_impl->get_tcp_connection_manager(), true
+            );
+        }
+    
+        if (
+            globals::instance().is_zerotime_enabled() && use_zerotime == true
+            )
+        {
+            auto hash_tx = wtx_new.get_hash();
+            
+            std::lock_guard<std::recursive_mutex> l2(
+                mutex_zerotime_lock_queue_
+            );
+            
+            zerotime_lock_queue_.push_back(hash_tx);
+            
+            zerotime_lock_queue_timer_.expires_from_now(
+                std::chrono::seconds(3)
+            );
+            zerotime_lock_queue_timer_.async_wait(
+                globals::instance().strand().wrap(std::bind(
+                &wallet::zerotime_lock_queue_tick, this,
+                std::placeholders::_1))
+            );
+        }
+    
+        return std::make_pair(true, "");
+    }
+    
+    return std::make_pair(false, "null stack_impl");
 }
 
 bool wallet::create_coin_stake(
@@ -2412,6 +3435,8 @@ bool wallet::create_coin_stake(
     const std::int64_t search_interval, transaction & tx_new
     )
 {
+    assert(globals::instance().is_client_spv() == false);
+    
     /**
      * The split and combine thresholds should not be adjusted for
      * security reasons.
@@ -2450,9 +3475,16 @@ bool wallet::create_coin_stake(
      */
     std::int64_t balance = get_balance();
     std::int64_t reserve_balance = 0;
-    
-    if (balance <= reserve_balance)
+
+    /**
+     * -reservebalance
+     */
+    if (0)
     {
+        log_error(
+            "Wallet failed to create coin stake, invalid reserve balance."
+        );
+        
         return false;
     }
     
@@ -2462,14 +3494,67 @@ bool wallet::create_coin_stake(
     
     std::int64_t value_in = 0;
     
+    /**
+     * Do not filter any denominations.
+     */
+    std::set<std::int64_t> filter;
+
+    /**
+     * If we have the collateral balance reserve it.
+     */
+    if (m_stack_impl && globals::instance().is_incentive_enabled())
+    {
+        if (incentive::instance().should_stake_collateral() == false)
+        {
+            auto collateral_balance =
+                m_stack_impl->get_incentive_manager()->collateral_balance()
+            ;
+            
+            auto index_previous = stack_impl::get_block_index_best();
+            
+            /**
+             * Get the collateral.
+             */
+            auto collateral =
+                incentive::instance().get_collateral(
+                index_previous ? index_previous->height() + 1 : 0)
+            ;
+            
+            if (collateral_balance >= collateral)
+            {
+                reserve_balance += collateral_balance * constants::coin;
+                
+                log_info(
+                    "Wallet (create coin stake) has reserve balance of " <<
+                    utility::format_money(reserve_balance) << "."
+                );
+            }
+        }
+        else
+        {
+            log_info(
+                "Wallet (create coin stake) has no reserve balance."
+            );
+        }
+    }
+    
+    if (balance <= reserve_balance)
+    {
+        log_error(
+            "Wallet failed to create coin stake, balance is less then reserve."
+        );
+        
+        return false;
+    }
+
     if (
         select_coins(balance - reserve_balance, tx_new.time(), coins,
-        value_in) == false
+        value_in, filter, 0) == false
         )
     {
         return false;
     }
-    
+
     if (coins.empty())
     {
         return false;
@@ -2546,6 +3631,11 @@ bool wallet::create_coin_stake(
                 hash_proof_of_stake)
                 )
             {
+                if (globals::instance().debug())
+                {
+                    log_debug("Wallet, create coin stake found kernel.");
+                }
+                
                 std::vector< std::vector<std::uint8_t> > solutions;
                 
                 types::tx_out_t which_type;
@@ -2562,7 +3652,22 @@ bool wallet::create_coin_stake(
                     solutions) == false
                     )
                 {
+                    if (globals::instance().debug())
+                    {
+                        log_debug(
+                            "Wallet, create coin stake failed to parse kernel."
+                        );
+                    }
+                    
                     break;
+                }
+                
+                if (globals::instance().debug())
+                {
+                    log_debug(
+                        "Wallet, create coin stake parsed kernel type = " <<
+                        which_type << "."
+                    );
                 }
                 
                 if (
@@ -2570,6 +3675,14 @@ bool wallet::create_coin_stake(
                     which_type != types::tx_out_pubkeyhash
                     )
                 {
+                    if (globals::instance().debug())
+                    {
+                        log_debug(
+                            "Wallet, create coin stake no support for kernel "
+                            "type = " << which_type << "."
+                        );
+                    }
+                    
                     break;
                 }
                 
@@ -2579,6 +3692,14 @@ bool wallet::create_coin_stake(
 
                     if (keystore.get_key(ripemd160(solutions[0]), k) == false)
                     {
+                        if (globals::instance().debug())
+                        {
+                            log_debug(
+                                "Wallet, create coin stake failed to get key "
+                                "for kernel type = " << which_type << "."
+                            );
+                        }
+                        
                         break;
                     }
                     
@@ -2609,6 +3730,14 @@ bool wallet::create_coin_stake(
                 {
                     tx_new.transactions_out().push_back(
                         transaction_out(0, script_pub_key_out)
+                    );
+                }
+                
+                if (globals::instance().debug())
+                {
+                    log_debug(
+                        "Wallet, create coin stake added kernel type = " <<
+                        which_type << "."
                     );
                 }
                 
@@ -2749,7 +3878,7 @@ bool wallet::create_coin_stake(
         /**
          * Generate the signature.
          */
-        int n = 0;
+        auto n = 0;
         
         for (auto & pcoin : previous_wtxs)
         {
@@ -2770,7 +3899,7 @@ bool wallet::create_coin_stake(
         /**
          * Enforce the size limit.
          */
-        if (buffer.size() >= constants::max_block_size_gen / 5)
+        if (buffer.size() > transaction::maxmimum_length / 3)
         {
             log_error(
                 "Wallet, create coin stake failed, exceeded coinstake "
@@ -2791,6 +3920,17 @@ bool wallet::create_coin_stake(
         }
         else
         {
+            /**
+             * -printfee
+             */
+            if (globals::instance().debug())
+            {
+                log_debug(
+                    "Wallet, create coin stake, fee = " <<
+                    utility::format_money(min_fee) << "."
+                );
+            }
+            
             break;
         }
     }
@@ -2798,9 +3938,10 @@ bool wallet::create_coin_stake(
     return true;
 }
 
-bool wallet::send_money(
+std::pair<bool, std::string> wallet::send_money(
     const script & script_pub_key, const std::int64_t & value,
-    const transaction_wallet & wtx_new
+    const transaction_wallet & wtx_new, const bool & use_zerotime,
+    const bool & use_only_chainblended
     )
 {
     std::lock_guard<std::recursive_mutex> l1(mutex_);
@@ -2820,7 +3961,9 @@ bool wallet::send_money(
             "transaction."
         );
         
-        return false;
+        return std::make_pair(
+            false, "wallet locked, unable to create transaction"
+        );
     }
     
     if (globals::instance().wallet_unlocked_mint_only())
@@ -2830,53 +3973,110 @@ bool wallet::send_money(
             "unable to create transaction."
         );
         
-        return false;
+        return std::make_pair(
+            false,
+            "wallet unlocked for minting only, unable to create transaction"
+        );
     }
     
+    /**
+     * Do not filter any coin denominations.
+     */
+    std::set<std::int64_t> filter;
+
     if (
         create_transaction(script_pub_key, value,
         *const_cast<transaction_wallet *> (&wtx_new), *reserve_key,
-        fee_required) == false
+        fee_required, filter, 0, use_zerotime, true, use_only_chainblended
+        ) == false
         )
     {
-        if (value + fee_required > get_balance())
+        if (
+            use_only_chainblended && value + fee_required >
+            get_on_chain_blended_balance()
+            )
         {
             log_error(
                 "Wallet, send money failed, create transaction failed, "
                 "insufficient funds, fee required = " <<
                 utility::format_money(fee_required) << "."
             );
+            
+            return std::make_pair(
+                false, "failed to create transaction, insufficient "
+                "blended funds"
+            );
+        }
+        else if (value + fee_required > get_balance())
+        {
+            log_error(
+                "Wallet, send money failed, create transaction failed, "
+                "insufficient funds, fee required = " <<
+                utility::format_money(fee_required) << "."
+            );
+            
+            return std::make_pair(
+                false, "failed to create transaction, insufficient funds"
+            );
         }
         else
         {
             log_error("Wallet, send money failed, create transaction failed.");
+            
+            /**
+             * If ZeroTime was used we either have no coins left with at least
+             * a single on-chain confirmation or were unable to find enough
+             * coins for this transaction that have at least a single on-chain
+             * confirmation.
+             */
+            if (use_zerotime == true)
+            {
+                return std::make_pair(
+                    false, "failed to create ZeroTime transaction, "
+                    "you may need to wait a minute and try again or send "
+                    "as a regular transaction"
+                );
+            }
+            else
+            {
+                return std::make_pair(false, "failed to create transaction");
+            }
         }
-        
-        return false;
     }
 
     /**
      * Commit the transaction.
      */
-    if (
-        commit_transaction(*const_cast<transaction_wallet *> (&wtx_new),
-        *reserve_key) == false
-        )
+    auto ret_pair = commit_transaction(
+        *const_cast<transaction_wallet *> (&wtx_new), *reserve_key, use_zerotime
+    );
+    
+    /**
+     * Commit the transaction.
+     */
+    if (ret_pair.first == false)
     {
         log_error(
             "Wallet, send money failed, commit transaction failed, "
             "wallet may need a rescan."
         );
         
-        return false;
+        return std::make_pair(ret_pair.first, ret_pair.second);
     }
+    
+    log_info(
+        "Wallet commit transaction " <<
+        wtx_new.get_hash().to_string().substr(0, 8) <<
+        ", use_only_chainblended = " << use_only_chainblended << "."
+    );
 
-    return true;
+    return std::make_pair(true, "");
 }
 
-bool wallet::send_money_to_destination(
+std::pair<bool, std::string> wallet::send_money_to_destination(
     const destination::tx_t & address, const std::int64_t & value,
-    const transaction_wallet & wtx_new
+    const transaction_wallet & wtx_new, const bool & use_zerotime,
+    const bool & use_only_chainblended
     )
 {
     if (value <= 0)
@@ -2885,7 +4085,7 @@ bool wallet::send_money_to_destination(
             "Wallet, send money to destination failed, invalid amount."
         );
     
-        return false;
+        return std::make_pair(false, "invalid amount");
     }
     
     if (value + globals::instance().transaction_fee() > get_balance())
@@ -2898,23 +4098,44 @@ bool wallet::send_money_to_destination(
             ", balance = " << get_balance() << "."
         );
     
-        return false;
+        return std::make_pair(false, "insufficient funds");
+    }
+    
+    if (
+        use_only_chainblended && value +
+        globals::instance().transaction_fee() > get_on_chain_blended_balance()
+        )
+    {
+        log_error(
+            "Wallet, send money to destination  failed, "
+            "insufficient funds = " << utility::format_money(value) <<
+            ", fee required = " <<
+            utility::format_money(globals::instance().transaction_fee()) <<
+            ", balance = " << get_balance() << "."
+        );
+    
+        return std::make_pair(false, "insufficient funds");
     }
     
     script script_pub_key;
     
     script_pub_key.set_destination(address);
 
-    return send_money(script_pub_key, value, wtx_new);
+    return send_money(
+        script_pub_key, value, wtx_new, use_zerotime, use_only_chainblended
+    );
 }
 
 void wallet::available_coins(
     std::vector<output> & coins, const bool & only_confirmed,
-    const std::shared_ptr<coin_control> & control
+    const std::set<std::int64_t> & filter,
+    const std::shared_ptr<coin_control> & control,
+    const bool & use_zerotime, const bool & use_chainblended,
+    const bool & use_only_chainblended
     ) const
 {
     coins.clear();
-
+    
     for (auto & i : m_transactions)
     {
         const transaction_wallet & coin = i.second;
@@ -2938,9 +4159,77 @@ void wallet::available_coins(
         {
             continue;
         }
-        
+
+        /**
+         * Do not spend "off-chain" coins, require one block confirmation.
+         */
+        if (use_zerotime && coin.get_depth_in_main_chain(false) == 0)
+        {
+            continue;
+        }
+
+        if (use_only_chainblended == false)
+        {
+            /**
+             * Do not use chainblended transactions if use_chainblended is
+             * false.
+             */
+            if (use_chainblended == false && coin.values().count("blended") > 0)
+            {
+                continue;
+            }
+        }
+
+        /**
+         * Check filter.
+         */
         for (auto j = 0; j < coin.transactions_out().size(); j++)
         {
+            auto found_in_filter = false;
+            
+            for (auto & k : filter)
+            {
+                if (k == coin.transactions_out()[j].value())
+                {
+                    found_in_filter = true;
+                    
+                    break;
+                }
+            }
+            
+            if (found_in_filter)
+            {
+                continue;
+            }
+            
+            auto is_chainblended = false;
+            
+            /**
+             * If use_only_chainblended is set to true we only use outputs
+             * who's value is equal to a possible blended transaction.
+             */
+            if (use_only_chainblended)
+            {
+                auto denominations_blended =
+                    chainblender::instance().denominations_blended()
+                ;
+                
+                for (auto & k : denominations_blended)
+                {
+                    if (k == coin.transactions_out()[j].value())
+                    {
+                        is_chainblended = true;
+
+                        break;
+                    }
+                }
+                
+                if (is_chainblended == false)
+                {
+                    continue;
+                }
+            }
+        
             if (
                 coin.is_spent(j) == false &&
                 is_mine(coin.transactions_out()[j]) &&
@@ -2999,7 +4288,10 @@ bool wallet::select_coins_min_conf(
     {
         const transaction_wallet & ref_coin = output.get_transaction_wallet();
 
-        if (output.get_depth() < (ref_coin.is_from_me() ? conf_mine : conf_theirs))
+        if (
+            output.get_depth() <
+            (ref_coin.is_from_me() ? conf_mine : conf_theirs)
+            )
         {
             continue;
         }
@@ -3014,7 +4306,7 @@ bool wallet::select_coins_min_conf(
             continue;
         }
         
-        std::int64_t n = ref_coin.transactions_out()[i].value();
+        auto n = ref_coin.transactions_out()[i].value();
 
         auto coin = std::make_pair(n, std::make_pair(ref_coin, i));
 
@@ -3046,6 +4338,7 @@ bool wallet::select_coins_min_conf(
             
             value_out += values[i].first;
         }
+        
         return true;
     }
 
@@ -3129,6 +4422,28 @@ bool wallet::select_coins_min_conf(
                 value_out += values[i].first;
             }
         }
+        
+        /**
+         * -printpriority
+         */
+        if (globals::instance().debug())
+        {
+            std::stringstream ss;
+            
+            ss << "Wallet is selecting coins, best subset:\n";
+            
+            for (auto i = 0; i < values.size(); i++)
+            {
+                if (bests[i])
+                {
+                    ss << utility::format_money(values[i].first) << "\n";
+                }
+            }
+            
+            ss << "total: \n" << utility::format_money(best_count);
+            
+            log_debug(ss.str());
+        }
     }
 
     return true;
@@ -3188,6 +4503,11 @@ void wallet::approximate_best_subset(
     }
 }
 
+const stack_impl * wallet::get_stack_impl() const
+{
+    return m_stack_impl;
+}
+
 std::map<sha256, transaction_wallet> & wallet::transactions()
 {
     std::lock_guard<std::recursive_mutex> l1(mutex_);
@@ -3235,6 +4555,117 @@ const std::int64_t & wallet::order_position_next() const
     std::lock_guard<std::recursive_mutex> l1(mutex_);
     
     return m_order_position_next;
+}
+
+void wallet::set_timestamp(const std::time_t & val)
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    m_timestamp = val;
+}
+
+const std::time_t & wallet::timestamp() const
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    return m_timestamp;
+}
+
+bool wallet::set_hd_key_master(
+    const key & k, const bool & do_add_key, const bool & write_to_database
+    )
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+
+    if (do_add_key == true)
+    {
+        /**
+         * Try to add the key.
+         */
+        if (add_key(k) == false)
+        {
+            throw std::runtime_error(
+                "wallet::set_hd_key_master() : add_key failed"
+            );
+        }
+    }
+
+    hd_configuration hd_config;
+    
+    hd_config.set_id_key_master(k.get_public_key().get_id());
+    
+    set_hd_configuration(hd_config, write_to_database);
+
+    const std::vector<std::uint8_t> seed = k.get_private_key();
+    
+    hd_keychain::set_versions(0x0488ADE4, 0x0488B21E);
+
+    log_debug(
+        "Wallet, set_hd_key_master seed = " << utility::hex_string(seed) << "."
+    );
+
+    hd_keychain::seed hd_seed(seed);
+    
+    auto key_master = hd_seed.get_master_key();
+    auto master_chain_code = hd_seed.get_master_chain_code();
+
+    m_hd_keychain = hd_keychain(key_master, master_chain_code);
+        
+    return true;
+}
+
+const hd_configuration & wallet::get_hd_configuration() const
+{
+    return m_hd_configuration;
+}
+
+bool wallet::set_hd_configuration(
+    const hd_configuration & hd_config, const bool & write_to_database
+    )
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    if (write_to_database == true)
+    {
+        if (db_wallet("wallet.dat").write_hd_configuration(hd_config) == false)
+        {
+            throw std::runtime_error("failed to write_hd_configuration");
+        }
+    }
+    
+    m_hd_configuration = hd_config;
+    
+    return true;
+}
+
+std::string wallet::hd_keychain_seed()
+{
+    std::string ret;
+    
+    /**
+     * Allocate the key.
+     */
+    key k;
+    
+    if (m_hd_configuration.id_key_master().is_empty() == false)
+	{
+        if (get_key(m_hd_configuration.id_key_master(), k) == false)
+        {
+            log_error("wallet::generate_new_key(): Key master not found");
+        }
+        else
+        {
+            auto compressed = false;
+            
+            const std::vector<std::uint8_t> seed = k.get_secret(compressed);
+            
+            ret = utility::hex_string(seed);
+            
+            log_debug("Wallet, seed = " << ret << ".");
+   	     }
+	}
+    
+    return ret;
 }
 
 void wallet::read_order_position(
@@ -3317,46 +4748,77 @@ std::int64_t wallet::get_account_balance(
     return get_account_balance(wallet_db, account_name, minimum_depth);
 }
 
-void wallet::check_tick(const boost::system::error_code & ec)
+std::pair<bool, std::string> wallet::get_account_address(
+    wallet & w, const std::string & name, address & addr_out
+    )
 {
-    if (ec)
+    db_wallet wallet_db("wallet.dat");
+
+    account account;
+    
+    wallet_db.read_account(name, account);
+
+    /**
+     * First check if the key has been used.
+     */
+    bool was_used = false;
+
+    if (account.get_key_public().is_valid())
     {
-        // ...
-    }
-    else
-    {
-        /**
-         * The mismatch spent coins.
-         */
-        std::int32_t mismatch_spent = 0;
+        script s;
         
-        /**
-         * The balance in question.
-         */
-        std::int64_t balance_in_question = 0;
+        s.set_destination(account.get_key_public().get_id());
         
-        bool check_only = false;
+        auto it = w.transactions().begin();
         
-        /**
-         * If there coins marked spent that should not be then check and
-         * repair them.
-         */
-        fix_spent_coins(mismatch_spent, balance_in_question, check_only);
-        
-        if (mismatch_spent == 0)
+        for (
+            ; it != w.transactions().end() &&
+            account.get_key_public().is_valid(); ++it
+            )
         {
-            log_info("Wallet check passed.");
+            const auto & wtx = it->second;
+            
+            for (auto & i : wtx.transactions_out())
+            {
+                if (i.script_public_key() == s)
+                {
+                    was_used = true;
+                    
+                    break;
+                }
+            }
         }
-        
-        /**
-         * Start the check timer.
-         */
-        check_timer_.expires_from_now(std::chrono::seconds(interval_check));
-        check_timer_.async_wait(globals::instance().strand().wrap(
-            std::bind(&wallet::check_tick, this,
-            std::placeholders::_1))
-        );
     }
+
+    /**
+     * If the public key is not valid or it was used then generate a new key.
+     */
+    if (account.get_key_public().is_valid() == false || was_used)
+    {
+        if (w.get_key_from_pool(account.get_key_public(), false) == false)
+        {
+            return std::make_pair(
+                false, "keypool is empty, needs refill"
+            );
+        }
+
+        w.set_address_book_name(account.get_key_public().get_id(), name);
+        
+        wallet_db.write_account(name, account);
+    }
+
+    addr_out = address(account.get_key_public().get_id());
+    
+    return std::make_pair(true, "");
+}
+
+void wallet::print()
+{
+    log_debug("m_transactions = " << m_transactions.size());
+    log_debug("m_request_counts = " << m_request_counts.size());
+    log_debug("m_address_book = " << m_address_book.size());
+    log_debug("m_key_pool = " << m_key_pool.size());
+    log_debug("m_master_keys = " << m_master_keys.size());
 }
 
 void wallet::resend_transactions_tick(const boost::system::error_code & ec)
@@ -3369,91 +4831,137 @@ void wallet::resend_transactions_tick(const boost::system::error_code & ec)
     {
         std::lock_guard<std::recursive_mutex> l1(mutex_);
         
-        if (
-            utility::is_initial_block_download() == false &&
-            stack_impl_.get_tcp_connection_manager(
-            )->tcp_connections().size() > 0 &&
-            globals::instance().time_best_received() >= time_last_resend_
-            )
+        if (m_stack_impl)
         {
-            /**
-             * Set the time of the last resend to now.
-             */
-            time_last_resend_ = std::time(0);
-            
-            db_tx tx_db("r");
-            
-            /**
-             * Sort by time.
-             */
-            std::multimap<std::uint32_t, transaction_wallet *> sorted;
-            
-            for (auto & item : m_transactions)
+            std::time_t time_best_received =
+                globals::instance().is_client_spv() ?
+                globals::instance().spv_block_last()->block_header(
+                ).timestamp : globals::instance().time_best_received()
+            ;
+
+            auto is_initial_block_download =
+                globals::instance().is_client_spv() ?
+                utility::is_spv_initial_block_download() :
+                utility::is_initial_block_download()
+            ;
+
+            if (
+                is_initial_block_download == false &&
+                m_stack_impl->get_tcp_connection_manager(
+                )->is_connected() && time_best_received >= time_last_resend_
+                )
             {
-                auto & wtx = item.second;
+                /**
+                 * Set the time of the last resend to now.
+                 */
+                time_last_resend_ = std::time(0);
+                
+                std::unique_ptr<db_tx> tx_db;
+                
+                if (globals::instance().is_client_spv() == true)
+                {
+                    // ...
+                }
+                else
+                {
+                    tx_db.reset(new db_tx("r"));
+                }
                 
                 /**
-                 * Allow time for the transaction to have been put into a
-                 * block.
+                 * Sort by time.
                  */
-                if (
-                    globals::instance().time_best_received() -
-                    static_cast<std::int64_t> (wtx.time_received()) > 300
-                    )
+                std::multimap<std::uint32_t, transaction_wallet *> sorted;
+                
+                for (auto & item : m_transactions)
                 {
-                    sorted.insert(
-                        std::make_pair(wtx.time_received(), &wtx)
-                    );
-                }
-            }
-            
-            for (auto & item : sorted)
-            {
-                auto & wtx = *item.second;
-
-                try
-                {
+                    auto & wtx = item.second;
+                    
                     /**
-                     * Make sure the transaction is from me.
+                     * Allow time for the transaction to have been put
+                     * into a block.
                      */
-                    if (wtx.is_from_me())
+                    if (
+                        time_best_received -
+                        static_cast<std::int64_t> (wtx.time_received()) >
+                        constants::work_and_stake_target_spacing &&
+                        wtx.get_depth_in_main_chain(false) == 0
+                        )
+                    {
+                        sorted.insert(
+                            std::make_pair(wtx.time_received(), &wtx)
+                        );
+                    }
+                }
+                
+                for (auto & item : sorted)
+                {
+                    auto & wtx = *item.second;
+
+                    try
                     {
                         /**
                          * Check the transaction.
                          */
                         if (wtx.check())
                         {
-                            /**
-                             * Relay the transaction to all connected peers.
-                             */
-                            wtx.relay_wallet_transaction(
-                                tx_db, stack_impl_.get_tcp_connection_manager()
+                            log_info(
+                                "Wallet is resending transaction " <<
+                                wtx.get_hash().to_string() << "."
                             );
+                            
+                            /**
+                             * Relay the transaction over TCP (but not
+                             * over UDP).
+                             */
+                            if (
+                                globals::instance().is_client_spv() == true
+                                )
+                            {
+                                wtx.spv_relay_wallet_transaction(
+                                    m_stack_impl->get_tcp_connection_manager()
+                                );
+                            }
+                            else
+                            {
+                                wtx.relay_wallet_transaction(
+                                    *tx_db,
+                                    m_stack_impl->get_tcp_connection_manager(),
+                                    false
+                                );
+                            }
+
+                            if (globals::instance().is_client_spv() == true)
+                            {
+                                /**
+                                 * We always perform ZeroTime locking on (SPV)
+                                 * client transactions.
+                                 */
+                                zerotime_lock(wtx.get_hash());
+                            }
+                            else
+                            {
+                                /**
+                                 * :TODO: If sent as ZeroTime perform a lock if
+                                 * still not yet in a block.
+                                 */
+                            }
                         }
                         else
                         {
                             log_error(
-                                "Wallet, resend transactions failed, check "
-                                "failed for transaction " <<
+                                "Wallet, resend transactions failed, "
+                                "check failed for transaction " <<
                                 wtx.get_hash().to_string() << "."
                             );
                         }
                     }
-                    else
+                    catch (std::exception & e)
                     {
                         log_debug(
-                            "Wallet, resend transaction " <<
-                            wtx.get_hash().to_string().substr(0, 8) <<
-                            " is not from me, skipping."
+                            "Wallet, resend transactions failed, "
+                            "what = " << e.what() << "."
                         );
                     }
-                }
-                catch (std::exception & e)
-                {
-                    log_error(
-                        "Wallet, resend transactions failed, what = " <<
-                        e.what() << "."
-                    );
                 }
             }
         }
@@ -3462,7 +4970,8 @@ void wallet::resend_transactions_tick(const boost::system::error_code & ec)
          * Start the timer again after a random time interval.
          */
         resend_transactions_timer_.expires_from_now(
-            std::chrono::seconds(random::uint16_random_range(300, 1200))
+            std::chrono::seconds(random::uint16_random_range(
+            5 * 60, 15 * 60))
         );
         resend_transactions_timer_.async_wait(globals::instance().strand().wrap(
             std::bind(&wallet::resend_transactions_tick, this,
@@ -3471,222 +4980,310 @@ void wallet::resend_transactions_tick(const boost::system::error_code & ec)
     }
 }
 
+void wallet::zerotime_lock_queue_tick(const boost::system::error_code & ec)
+{
+    if (ec)
+    {
+        // ...
+    }
+    else
+    {
+        if (globals::instance().is_zerotime_enabled() == true)
+        {
+            std::lock_guard<std::recursive_mutex> l1(
+                mutex_zerotime_lock_queue_
+            );
+        
+            if (zerotime_lock_queue_.size() > 0)
+            {
+                const auto & hash_tx = zerotime_lock_queue_.front();
+                
+                zerotime_lock(hash_tx);
+            
+                zerotime_lock_queue_.pop_front();
+            
+                if (zerotime_lock_queue_.size() > 0)
+                {
+                    zerotime_lock_queue_timer_.expires_from_now(
+                        std::chrono::seconds(3)
+                    );
+                    zerotime_lock_queue_timer_.async_wait(
+                        globals::instance().strand().wrap(std::bind(
+                        &wallet::zerotime_lock_queue_tick, this,
+                        std::placeholders::_1))
+                    );
+                }
+            }
+        }
+    }
+}
+
 bool wallet::do_encrypt(const std::string & passphrase)
 {
     if (is_crypted())
     {
-        return false;
-    }
-
-    /**
-     * The master key.
-     */
-    types::keying_material_t master_key;
-    
-    /**
-     * RAND_add
-     */
-    random::openssl_RAND_add();
-
-    /**
-     * Allocate the master key.
-     */
-    master_key.resize(crypter::wallet_key_size);
-    
-    /**
-     * Generate the master key.
-     */
-    RAND_bytes(&master_key[0], crypter::wallet_key_size);
-
-    key_wallet_master master_key_wallet;
-
-    /**
-     * RAND_add
-     */
-    random::openssl_RAND_add();
-    
-    /**
-     * Allocate the master key wallet's salt.
-     */
-    master_key_wallet.salt().resize(crypter::wallet_salt_size);
-    
-    /**
-     * Generate the master key wallet.
-     */
-    RAND_bytes(&master_key_wallet.salt()[0], crypter::wallet_salt_size);
-    
-    /**
-     * Allocate the crypter.
-     */
-    crypter c;
-    
-    /**
-     * Get the milliseconds since epoch.
-     */
-    auto time_start = std::chrono::duration_cast<
-        std::chrono::milliseconds> (
-        std::chrono::system_clock::now().time_since_epoch()
-    ).count();
-    
-    /**
-     * Set the key from the passphrase.
-     */
-    c.set_key_from_passphrase(
-        passphrase, master_key_wallet.salt(), 25000,
-        master_key_wallet.derivation_method()
-    );
-
-    /**
-     * Set the derive iterations.
-     */
-    master_key_wallet.set_derive_iterations(
-        2500000 / (static_cast<double> ((std::chrono::duration_cast<
-        std::chrono::milliseconds> (std::chrono::system_clock::now(
-        ).time_since_epoch()).count() - time_start)))
-    );
-
-    /**
-     * Set the start time.
-     */
-    time_start = std::chrono::duration_cast<
-        std::chrono::milliseconds> (
-        std::chrono::system_clock::now().time_since_epoch()
-    ).count();
-    
-    /**
-     * Set the key from the passphrase.
-     */
-    c.set_key_from_passphrase(
-        passphrase, master_key_wallet.salt(),
-        master_key_wallet.derive_iterations(),
-        master_key_wallet.derivation_method()
-    );
-    
-    /**
-     * Set the derive iterations.
-     */
-    master_key_wallet.set_derive_iterations(
-        (master_key_wallet.derive_iterations() +
-        master_key_wallet.derive_iterations() * 100 /
-        (static_cast<double> ((std::chrono::duration_cast<
-        std::chrono::milliseconds> (std::chrono::system_clock::now(
-        ).time_since_epoch()).count() - time_start)))) / 2
-    );
-
-    if (master_key_wallet.derive_iterations() < 25000)
-    {
-        master_key_wallet.set_derive_iterations(25000);
-    }
-    
-    log_debug(
-        "Wallet is encrypting with " <<
-        master_key_wallet.derive_iterations() << " derive iterations."
-    );
-
-    /**
-     * Set the key from the passphrase.
-     */
-    if (
-        c.set_key_from_passphrase(passphrase, master_key_wallet.salt(),
-        master_key_wallet.derive_iterations(),
-        master_key_wallet.derivation_method()) == false
-        )
-    {
-        return false;
-    }
-    
-    auto crypted_key = master_key_wallet.crypted_key();
-    
-    /**
-     * Encrypt the master key.
-     */
-    if (c.encrypt(master_key, crypted_key) == false)
-    {
-        return false;
-    }
-
-    std::lock_guard<std::recursive_mutex> l1(mutex_);
-    
-    m_master_keys[++m_master_key_max_id] = master_key_wallet;
-    
-    if (is_file_backed_)
-    {
-        m_db_wallet_encryption = std::make_shared<db_wallet> ();
+        log_error("Wallet tried to encrypt but is already encrypted.");
         
-        if (m_db_wallet_encryption->txn_begin() == false)
+        return false;
+    }
+    else
+    {
+        std::lock_guard<std::recursive_mutex> l1(mutex_);
+        
+        /**
+         * The master key.
+         */
+        types::keying_material_t master_key;
+        
+        /**
+         * RAND_add
+         */
+        random::openssl_RAND_add();
+
+        /**
+         * Allocate the master key.
+         */
+        master_key.resize(crypter::wallet_key_size);
+        
+        /**
+         * Generate the master key.
+         */
+        RAND_bytes(&master_key[0], crypter::wallet_key_size);
+
+        key_wallet_master master_key_wallet;
+
+        /**
+         * RAND_add
+         */
+        random::openssl_RAND_add();
+        
+        /**
+         * Allocate the master key wallet's salt.
+         */
+        master_key_wallet.salt().resize(crypter::wallet_salt_size);
+        
+        /**
+         * Generate the master key wallet.
+         */
+        RAND_bytes(&master_key_wallet.salt()[0], crypter::wallet_salt_size);
+        
+        /**
+         * Allocate the crypter.
+         */
+        crypter c;
+        
+        /**
+         * Get the milliseconds since epoch.
+         */
+        auto time_start = std::chrono::duration_cast<
+            std::chrono::milliseconds> (
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+        
+        /**
+         * Set the key from the passphrase.
+         */
+        c.set_key_from_passphrase(
+            passphrase, master_key_wallet.salt(), 25000,
+            master_key_wallet.derivation_method()
+        );
+
+        /**
+         * Set the derive iterations.
+         */
+        master_key_wallet.set_derive_iterations(
+            2500000 / (static_cast<double> ((std::chrono::duration_cast<
+            std::chrono::milliseconds> (std::chrono::system_clock::now(
+            ).time_since_epoch()).count() - time_start)))
+        );
+
+        /**
+         * Set the start time.
+         */
+        time_start = std::chrono::duration_cast<
+            std::chrono::milliseconds> (
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+        
+        /**
+         * Set the key from the passphrase.
+         */
+        c.set_key_from_passphrase(
+            passphrase, master_key_wallet.salt(),
+            master_key_wallet.derive_iterations(),
+            master_key_wallet.derivation_method()
+        );
+        
+        /**
+         * Set the derive iterations.
+         */
+        master_key_wallet.set_derive_iterations(
+            (master_key_wallet.derive_iterations() +
+            master_key_wallet.derive_iterations() * 100 /
+            (static_cast<double> ((std::chrono::duration_cast<
+            std::chrono::milliseconds> (std::chrono::system_clock::now(
+            ).time_since_epoch()).count() - time_start)))) / 2
+        );
+
+        if (master_key_wallet.derive_iterations() < 25000)
+        {
+            master_key_wallet.set_derive_iterations(25000);
+        }
+        
+        log_debug(
+            "Wallet is encrypting with " <<
+            master_key_wallet.derive_iterations() << " derive iterations."
+        );
+
+        /**
+         * Set the key from the passphrase.
+         */
+        if (
+            c.set_key_from_passphrase(passphrase, master_key_wallet.salt(),
+            master_key_wallet.derive_iterations(),
+            master_key_wallet.derivation_method()) == false
+            )
         {
             return false;
         }
         
-        m_db_wallet_encryption->write_master_key(
-            m_master_key_max_id, master_key_wallet
-        );
-    }
-
-    /** 
-     * Encrypt the keys.
-     */
-    if (encrypt_keys(master_key) == false)
-    {
-        if (is_file_backed_)
+        /**
+         * Encrypt the master key.
+         */
+        if (c.encrypt(master_key, master_key_wallet.crypted_key()) == false)
         {
-            m_db_wallet_encryption->txn_abort();
+            return false;
         }
-        
-        log_error(
-            "Wallet encrypting keys failed, restart to load the "
-            "unencrypted wallet."
-        );
-        
-        return false;
-    }
 
-    /**
-     * Set the minimum version.
-     */
-    set_min_version(feature_walletcrypt, m_db_wallet_encryption.get(), true);
-
-    if (is_file_backed_)
-    {
-        if (m_db_wallet_encryption->txn_commit() == false)
+        m_master_keys[++m_master_key_max_id] = master_key_wallet;
+        
+        if (m_is_file_backed)
         {
+            m_db_wallet_encryption = std::make_shared<db_wallet> ("wallet.dat");
+            
+            if (m_db_wallet_encryption->txn_begin() == false)
+            {
+                return false;
+            }
+            
+            m_db_wallet_encryption->write_master_key(
+                m_master_key_max_id, master_key_wallet
+            );
+        }
+
+        /** 
+         * Encrypt the keys.
+         */
+        if (encrypt_keys(master_key) == false)
+        {
+            if (m_is_file_backed)
+            {
+                m_db_wallet_encryption->txn_abort();
+            }
+            
             log_error(
-                "Wallet encrypting transaction commit failed, restart to "
-                "load the unencrypted wallet."
+                "Wallet encrypting keys failed, restart to load the "
+                "unencrypted wallet."
             );
             
             return false;
         }
+
+        /**
+         * Set the minimum version.
+         */
+        set_min_version(feature_walletcrypt, m_db_wallet_encryption.get(), true);
+
+        if (m_is_file_backed)
+        {
+            if (m_db_wallet_encryption->txn_commit() == false)
+            {
+                log_error(
+                    "Wallet encrypting transaction commit failed, restart to "
+                    "load the unencrypted wallet."
+                );
+                
+                return false;
+            }
+            
+            m_db_wallet_encryption.reset();
+        }
+
+        /**
+         * Lock the wallet.
+         */
+        lock();
         
-        m_db_wallet_encryption.reset();
+        /**
+         * Unlock the wallet.
+         */
+        unlock(passphrase);
+        
+        /**
+         * Mark old keys as used and generate new ones.
+         */
+        new_key_pool();
+        
+        /**
+         * Lock the wallet.
+         */
+        lock();
+
+        /**
+         * Rewrite the dat file to remove any database remains of clear-text key
+         * material. The original data will still exist on the hard drive on some
+         * operating systems since this is not a secure wipe of the disk's bits.
+         */
+        db::rewrite("wallet.dat");
     }
-
-    /**
-     * Lock the wallet.
-     */
-    lock();
     
-    /**
-     * Unlock the wallet.
-     */
-    unlock(passphrase);
-    
-    /**
-     * Mark old keys as used and generate new ones.
-     */
-    new_key_pool();
-    
-    /**
-     * Lock the wallet.
-     */
-    lock();
-
-    /**
-     * Rewrite the dat file to remove any database remains of clear-text key
-     * material. The original data will still exist on the hard drive on some
-     * operating systems since this is not a secure wipe of the disk's bits.
-     */
-    db::rewrite("wallet.dat");
-
     return true;
+}
+
+void wallet::tick_flush(const boost::system::error_code & ec)
+{
+    if (ec)
+    {
+        // ...
+    }
+    else
+    {
+        /**
+         * The last time the wallet was updated (written to).
+         */
+        static auto g_wallet_updated = db_wallet::wallet_updated();
+        
+        if (g_wallet_updated != db_wallet::wallet_updated())
+        {
+            log_info("Wallet database was updated, flushing.");
+
+            g_wallet_updated = db_wallet::wallet_updated();
+
+            /**
+             * Spawn a detached thread to perform the flush.
+             */
+            std::thread([this]()
+            {
+                /**
+                 * Periodically flush.
+                 */
+                flush();
+                
+            }).detach();
+        }
+        
+        /**
+         * Print
+         */
+        print();
+        
+        /**
+         * Restart timer.
+         */
+        timer_flush_.expires_from_now(std::chrono::seconds(8));
+        timer_flush_.async_wait(globals::instance().strand().wrap(
+            std::bind(&wallet::tick_flush, this,
+            std::placeholders::_1))
+        );
+    }
 }

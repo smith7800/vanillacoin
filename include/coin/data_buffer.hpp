@@ -1,9 +1,9 @@
  /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -32,7 +32,9 @@
 #include <vector>
 
 #include <boost/asio.hpp>
+#include <boost/crc.hpp>
 
+#include <coin/android.hpp>
 #include <coin/endian.hpp>
 #include <coin/file.hpp>
 #include <coin/protocol.hpp>
@@ -75,9 +77,16 @@ namespace coin {
              */
 			data_buffer(const data_buffer & other)
 			    : m_read_ptr(0)
-                , file_offset_(0)
+                , file_offset_(other.file_offset_)
+                , file_(other.file_)
 			{
+                clear();
+                
+                m_data.reserve(other.size());
+
 			    write_bytes(other.data(), other.size());
+                
+                m_read_ptr = m_data.size() > 0 ? &m_data[0] : 0;
 			}
         
             /**
@@ -88,6 +97,8 @@ namespace coin {
 			    : m_read_ptr(0)
                 , file_offset_(0)
 			{
+                m_data.reserve(len);
+                
 			    for (std::size_t i = 0; i < len; i++)
 			    {
 			        write_byte(0);   
@@ -105,9 +116,11 @@ namespace coin {
 			{
 			    if (len > 0)
 			    {
+                    m_data.reserve(len);
+                    
 			        write_bytes(buf, len);
                     
-                    m_read_ptr = &m_data[0];
+                    m_read_ptr = m_data.size() > 0 ? &m_data[0] : 0;
 			    }
 			}
 
@@ -237,7 +250,7 @@ namespace coin {
 
 			void rewind()
 			{
-				m_read_ptr = &m_data[0];
+				m_read_ptr = m_data.size() > 0 ? &m_data[0] : 0;
 			}
 
 			void seek(const std::size_t & offset)
@@ -252,6 +265,11 @@ namespace coin {
 			    }
 			}
 
+			void reserve(const std::size_t & len)
+			{
+                m_data.reserve(len);
+			}
+        
 			void resize(const std::size_t & len)
 			{
                 m_data.resize(len);
@@ -259,7 +277,10 @@ namespace coin {
 
 			void clear()
 			{
-			    m_data.clear();
+                std::vector<char> empty;
+                
+                m_data.swap(empty);
+
 			    m_read_ptr = 0;
 			}
 
@@ -280,7 +301,7 @@ namespace coin {
                     }
                     else
                     {
-                        assert(0);
+                        throw std::runtime_error("read (file) failed");
                     }
                 }
                 else
@@ -306,12 +327,10 @@ namespace coin {
 
 			void write(void * data, const std::size_t & len)
 			{
-				m_data.resize(m_data.size() + len);
-
-                if (m_data.size() > 0)
-                {
-                    std::memcpy(&m_data[0] + m_data.size() - len, data, len);
-                }
+                m_data.insert(
+                    m_data.end(), reinterpret_cast<char *>(data),
+                    reinterpret_cast<char *>(data) + len
+                );
 			}
         
             /**
@@ -588,6 +607,27 @@ namespace coin {
                 write_sha256(pair.first);
                 write_uint32(pair.second);
             }
+        
+            /**
+             * Calculates the checksum of the data.
+             */
+			std::uint32_t checksum()
+			{
+			    /**
+			     * Allocate the crc digest.
+			     */
+			    boost::crc_32_type digest;
+
+			    /**
+			     * Calculate the checksum.
+			     */
+			    digest.process_bytes(&m_data[0], m_data.size());
+
+			    /**
+			     * Return the checksum.
+			     */
+			    return digest.checksum();
+			}
 
             /**
              * The file.
@@ -604,8 +644,25 @@ namespace coin {
                     /**
                      * Set the file offset.
                      */
-                    file_offset_ = f->ftell();
+                    file_offset_ = file_->ftell();
                 }
+            }
+        
+            /**
+             * operator =
+             */
+            data_buffer & operator = (const data_buffer & other)
+            {
+                clear();
+                
+			    write_bytes(other.data(), other.size());
+                
+                m_read_ptr = m_data.size() > 0 ? &m_data[0] : 0;
+                
+                file_offset_ = other.file_offset_;
+                file_ = other.file_;
+                
+                return *this;
             }
         
         private:

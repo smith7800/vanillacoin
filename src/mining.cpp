@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -160,6 +160,57 @@ std::uint32_t mining::scan_hash_whirlpool(
             assert(buffer.size() == block::header_length);
             
             auto digest = hash::whirlpoolx(
+                reinterpret_cast<std::uint8_t *> (buffer.data()), buffer.size()
+            );
+            
+            out_hashes++;
+            
+            /**
+             * Check for some zero bits.
+             */
+            if (digest[31] == 0 && digest[30] == 0)
+            {
+                std::memcpy(out_digest, &digest[0], sha256::digest_length);
+
+                std::memcpy(out_header, &data, block::header_length);
+
+                return data.nonce;
+            }
+        }
+        
+        if (data.nonce >= max_nonce)
+        {
+            return static_cast<std::uint32_t> (-1);
+        }
+    }
+
+    return static_cast<std::uint32_t> (-1);
+}
+
+std::uint32_t mining::scan_hash_blake256(
+    block::header_t * in_header, std::uint32_t max_nonce,
+    std::uint32_t & out_hashes, std::uint8_t * out_digest,
+    block::header_t * out_header
+    )
+{
+    block::header_t data = *in_header;
+
+    while (globals::instance().state() == globals::state_started)
+    {
+        if (++data.nonce < max_nonce)
+        {
+            data_buffer buffer;
+            
+            buffer.write_uint32(data.version);
+            buffer.write_sha256(data.hash_previous_block);
+            buffer.write_sha256(data.hash_merkle_root);
+            buffer.write_uint32(data.timestamp);
+            buffer.write_uint32(data.bits);
+            buffer.write_uint32(data.nonce);
+
+            assert(buffer.size() == block::header_length);
+            
+            auto digest = hash::blake2568round(
                 reinterpret_cast<std::uint8_t *> (buffer.data()), buffer.size()
             );
             

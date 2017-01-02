@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -170,6 +170,41 @@ bool key_store_crypto::add_key(const key & k)
     return true;
 }
 
+bool key_store_crypto::have_key(const types::id_key_t & address) const
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    if (is_crypted() == false)
+    {
+        return key_store_basic::have_key(address);
+    }
+    
+    return m_crypted_keys.count(address) > 0;
+}
+
+void key_store_crypto::get_keys(std::set<types::id_key_t> & addresses) const
+{
+    if (is_crypted() == false)
+    {
+        key_store_basic::get_keys(addresses);
+    }
+    else
+    {
+        addresses.clear();
+
+        std::lock_guard<std::recursive_mutex> l1(mutex_);
+        
+        auto it = m_crypted_keys.begin();
+       
+        while (it != m_crypted_keys.end())
+        {
+            addresses.insert(it->first);
+            
+            it++;
+        }
+    }
+}
+
 bool key_store_crypto::get_key(
     const types::id_key_t & address, key & key_out
     ) const
@@ -244,6 +279,12 @@ bool key_store_crypto::get_public_key(
     }
 
     return false;
+}
+
+const key_store_crypto::crypted_key_map_t &
+    key_store_crypto::crypted_keys() const
+{
+    return m_crypted_keys;
 }
 
 bool key_store_crypto::add_crypted_key(

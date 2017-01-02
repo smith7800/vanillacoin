@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -28,6 +28,8 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <coin/filesystem.hpp>
 
@@ -41,6 +43,11 @@ namespace coin {
         public:
         
             /**
+             * The default cache size.
+             */
+            enum { default_cache_size = 25 };
+        
+            /**
              * Constructor
              */
             db_env();
@@ -52,10 +59,10 @@ namespace coin {
         
             /**
              * Opens the database environment.
-             * @param data_path The data path.
+             * @param cache_size The cache size.
              */
             bool open(
-                const std::string & data_path = filesystem::data_path()
+                const std::int32_t & cache_size = default_cache_size
             );
         
             /**
@@ -82,6 +89,18 @@ namespace coin {
             bool verify(const std::string & file_name);
     
             /**
+             * Attempts to salvage data from a file.
+             * @param file_name The file name.
+             * @param aggressive If true the DB_AGGRESSIVE will be used.
+             * @param result The result.
+             */
+            bool salvage(
+                const std::string & file_name, const bool & aggressive,
+                std::vector< std::pair< std::vector<std::uint8_t>,
+                std::vector<std::uint8_t> > > & result
+            );
+    
+            /**
              * checkpoint_lsn
              * @param file_name The file name.
              */
@@ -89,8 +108,9 @@ namespace coin {
         
             /**
              * Flushes.
+             * @param detach_db If true the database will be detached.
              */
-            void flush();
+            void flush(const bool & detach_db = false);
         
             /**
              * The DbEnv.
@@ -106,6 +126,11 @@ namespace coin {
              * The Db objects.
              */
             std::map<std::string, Db *> & Dbs();
+        
+            /**
+             * The std::mutex.
+             */
+            static std::recursive_mutex & mutex_DbEnv();
         
             /**
              * txn_begin
@@ -130,6 +155,11 @@ namespace coin {
              */
             std::map<std::string, Db *> m_Dbs;
     
+            /**
+             * The m_DbEnv std::recursive_mutex.
+             */
+            static std::recursive_mutex g_mutex_DbEnv;
+        
         protected:
         
             /**
@@ -140,11 +170,6 @@ namespace coin {
                 state_opened,
                 state_closed,
             } state_;
-        
-            /**
-             * m_DbEnv std::recursive_mutex.
-             */
-            std::recursive_mutex mutex_DbEnv_;
         
             /**
              * m_file_use_counts std::recursive_mutex.

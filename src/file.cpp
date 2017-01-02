@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -20,7 +20,9 @@
 
 #if (defined _MSC_VER)
 #include <io.h>
+#include <windows.h>
 #else
+#include <stdio.h>
 #include <unistd.h>
 #endif // _MSC_VER
 
@@ -80,6 +82,22 @@ bool file::read(char * buf, const std::size_t & len)
     return false;
 }
 
+bool file::read(char * buf, std::size_t & len)
+{
+    if (m_file)
+    {
+        len = fread(buf, 1, len, m_file);
+        
+        return true;
+    }
+    else
+    {
+        // ...
+    }
+    
+    return false;
+}
+
 void file::write(const char * buf, const std::size_t & len)
 {
     if (m_file)
@@ -93,6 +111,18 @@ void file::write(const char * buf, const std::size_t & len)
     {
         // ...
     }
+}
+
+
+bool file::remove(const std::string & path)
+{
+#if (defined _MSC_VER)
+    return ::DeleteFileW(
+        std::wstring(path.begin(), path.end()).c_str()
+    ) != 0;
+#else
+    return ::unlink(path.c_str())== 0;
+#endif
 }
 
 long file::size()
@@ -139,7 +169,7 @@ int file::fsync()
 #if (defined _MSC_VER)
     return ::_commit(_fileno(m_file));
 #else
-    return ::fsync(::fileno(m_file));
+    return ::fsync(fileno(m_file));
 #endif // _MSC_VER
 }
 

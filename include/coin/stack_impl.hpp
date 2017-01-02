@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -44,7 +44,11 @@ namespace coin {
     class alert_manager;
     class block;
     class block_index;
+    class block_merkle;
+    class chainblender_manager;
+    class database_stack;
     class db_env;
+    class incentive_manager;
     class mining_manager;
     class nat_pmp_client;
     class rpc_manager;
@@ -54,6 +58,7 @@ namespace coin {
     class tcp_connection;
     class tcp_connection_manager;
     class upnp_client;
+    class zerotime_manager;
     
     /**
      * The stack implementation.
@@ -114,10 +119,42 @@ namespace coin {
             );
         
             /**
+             * Encrypts the wallet.
+             * @param passphrase The passphrase.
+             */
+            void wallet_encrypt(const std::string & passphrase);
+        
+            /**
+             * Locks the wallet.
+             */
+            void wallet_lock();
+            
+            /**
+             * Unlocks the wallet.
+             * @param passphrase The passphrase.
+             */
+            void wallet_unlock(const std::string & passphrase);
+        
+            /**
+             * Changes the wallet passphrase.
+             * @param passphrase_old The old passphrase.
+             * @param password_new The new passphrase.
+             */
+            void wallet_change_passphrase(
+                const std::string & passphrase_old,
+                const std::string & password_new
+            );
+            
+            /**
              * The local endpoint.
              */
             const boost::asio::ip::tcp::endpoint & local_endpoint() const;
         
+            /**
+             * If true a wallet file exists.
+             */
+            static bool wallet_exists(const bool & is_client);
+            
             /**
              * If true the wallet is crypted.
              * @param wallet_id The wallet id.
@@ -130,6 +167,74 @@ namespace coin {
              */
             bool wallet_is_locked(const std::uint32_t & wallet_id);
 
+            /**
+             * Performs a ZeroTime lock on the transaction.
+             * @param tx_id The transaction id.
+             */
+            void wallet_zerotime_lock(const std::string & tx_id);
+        
+            /**
+             * Get's the wallet HD keychain seed (if configured).
+             */
+            std::string wallet_hd_keychain_seed();
+        
+            /**
+             * Generates a new wallet address.
+             * @param label The label.
+             */
+            void wallet_generate_address(const std::string & label);
+            
+            /**
+             * Starts chainblender.
+             */
+            void chainblender_start();
+        
+            /**
+             * Stops chainblender.
+             */
+            void chainblender_stop();
+            
+            /**
+             * Sends an RPC command line.
+             * @param command_line The command line.
+             */
+            void rpc_send(const std::string & command_line);
+        
+            /**
+             * Rescans the chain.
+             */
+            void rescan_chain();
+            
+            /**
+             * Sets the wallet.transaction.history.maximum
+             * @param val The value.
+             */
+            void set_configuration_wallet_transaction_history_maximum(
+                const std::time_t & val
+            );
+        
+            /**
+             * The wallet.transaction.history.maximum.
+             */
+            const std::time_t
+                configuration_wallet_transaction_history_maximum() const
+            ;
+        
+            /**
+             * Sets chainblender to use common output denominations.
+             * @param val The value.
+             */
+            void set_configuration_chainblender_use_common_output_denominations(
+                const bool & val
+            );
+        
+            /**
+             * The chainblender.use_common_output_denominations.
+             */
+            const bool
+                configuration_chainblender_use_common_output_denominations()
+            const;
+            
             /**
              * Performs an http get operation toward the url.
              * @param url The url.
@@ -144,12 +249,14 @@ namespace coin {
             /**
              * Performs an http post operation toward the url.
              * @param url The url.
+             * @param port The port.
              * @param headers The headers.
              * @param body The body.
              * @param f The function.
              */
             void url_post(
                 const std::string & url,
+                const std::uint16_t & port,
                 const std::map<std::string, std::string> & headers,
                 const std::string & body,
                 const std::function<void (const std::map<std::string,
@@ -168,6 +275,17 @@ namespace coin {
             );
         
             /**
+             * Saves the (SPV) block_merkle's.
+             */
+            void spv_block_merkles_save();
+        
+            /**
+             * Loads the (SPV) block_merkle's.
+             * @param trys The number of recursive trys,
+             */
+            void spv_block_merkles_load(std::uint8_t & trys);
+        
+            /**
              * The configuration.
              */
             configuration & get_configuration();
@@ -183,6 +301,16 @@ namespace coin {
             std::shared_ptr<alert_manager> & get_alert_manager();
         
             /**
+             * The chainblender_manager.
+             */
+            std::shared_ptr<chainblender_manager> & get_chainblender_manager();
+        
+            /**
+             * The database_stack.
+             */
+            std::shared_ptr<database_stack> & get_database_stack();
+        
+            /**
              * The mining_manager.
              */
             std::shared_ptr<mining_manager> & get_mining_manager();
@@ -191,6 +319,11 @@ namespace coin {
              * The status_manager.
              */
             std::shared_ptr<status_manager> & get_status_manager();
+        
+            /**
+             * The status_manager.
+             */
+            const std::shared_ptr<status_manager> & get_status_manager() const;
         
             /**
              * The tcp_acceptor.
@@ -205,14 +338,34 @@ namespace coin {
             ;
         
             /**
+             * The zerotime_manager.
+             */
+            std::shared_ptr<zerotime_manager> & get_zerotime_manager();
+        
+            /**
+             * The incentive_manager.
+             */
+            std::shared_ptr<incentive_manager> & get_incentive_manager();
+
+            /**
+             * The main std::recursive_mutex.
+             */
+            static std::recursive_mutex & mutex();
+
+            /**
              * The db_env
              */
             static std::shared_ptr<db_env> & get_db_env();
         
             /**
+             * Set's the genesis block.
+             */
+            static void set_block_index_genesis(block_index * val);
+        
+            /**
              * The genesis block index.
              */
-            static std::shared_ptr<block_index> & get_block_index_genesis();
+            static block_index * get_block_index_genesis();
         
             /**
              * The seen stake.
@@ -222,9 +375,15 @@ namespace coin {
             > & get_seen_stake();
         
             /**
+             * Set's the best block index.
+             * @param val The block_index.
+             */
+            static void set_block_index_best(block_index * val);
+        
+            /**
              * The best block index.
              */
-            static std::shared_ptr<block_index> & get_block_index_best();
+            static block_index * get_block_index_best();
         
             /**
              * The best chain trust.
@@ -240,7 +399,7 @@ namespace coin {
              * Inserts a block index.
              * @param hash_block The hash of the block.
              */
-            static std::shared_ptr<block_index> insert_block_index(
+            static block_index * insert_block_index(
                 const sha256 & hash_block
             );
 
@@ -258,15 +417,13 @@ namespace coin {
              * The block difficulty.
              * index The block_index.
              */
-            double difficulty(
-                const std::shared_ptr<block_index> & index = 0
-            ) const;
+            double difficulty(block_index * index = 0) const;
 
             /**
              * Calculates the average network hashes per second based on the
              * last N blocks.
              */
-            std::uint64_t network_hash_per_second(std::int32_t lookup);
+            std::uint64_t network_hash_per_second();
 
             /**
              * Called when an error occurs.
@@ -290,6 +447,31 @@ namespace coin {
                 const std::map<std::string, std::string> & pairs
             );
         
+            /**
+             * Called when an (SPV) merkleblock is received.
+             * @param connection The tcp_connection.
+             * @param merkle_block The block_merkle.
+             * @param transactions_received The transactions we've received that
+             * match the current block_merkle's transaction hashes.
+             */
+            void on_spv_merkle_block(
+                const std::shared_ptr<tcp_connection> & connection,
+                block_merkle & merkle_block,
+                const std::vector<transaction> & transactions_received
+            );
+        
+            /**
+             * Sets the (SPV) block height with time and filtered transaction
+             * hashes.
+             * @param height The height.
+             * @param time The time.
+             @ @param hashes_tx The (matched) transaction hashes.
+             */
+            void set_spv_block_height(
+                const std::int32_t & height, const std::time_t & time,
+                const std::vector<sha256> & hashes_tx
+            );
+            
         private:
         
             /**
@@ -306,6 +488,12 @@ namespace coin {
              * Called periodically to inform about blockchain.
              */
             void on_status_blockchain();
+        
+            /**
+             * Called periodically to perform maintenance on the database
+             * environment.
+             */
+            void on_database_env();
         
             /**
              * The local endpoint.
@@ -326,6 +514,16 @@ namespace coin {
              * The alert_manager.
              */
             std::shared_ptr<alert_manager> m_alert_manager;
+        
+            /**
+             * The chainblender_manager.
+             */
+            std::shared_ptr<chainblender_manager> m_chainblender_manager;
+        
+            /**
+             * The database_stack.
+             */
+            std::shared_ptr<database_stack> m_database_stack;
         
             /**
              * The mining_manager.
@@ -363,6 +561,21 @@ namespace coin {
             std::shared_ptr<upnp_client> m_upnp_client;
         
             /**
+             * The zerotime_manager.
+             */
+            std::shared_ptr<zerotime_manager> m_zerotime_manager;
+        
+            /**
+             * The incentive_manager.
+             */
+            std::shared_ptr<incentive_manager> m_incentive_manager;
+
+            /**
+             * The main std::recursive_mutex.
+             */
+            static std::recursive_mutex g_mutex;
+        
+            /**
              * The db_env
              */
             static std::shared_ptr<db_env> g_db_env;
@@ -370,7 +583,7 @@ namespace coin {
             /**
              * The genesis block index.
              */
-            static std::shared_ptr<block_index> g_block_index_genesis;
+            static block_index * g_block_index_genesis;
         
             /**
              * The seen stake.
@@ -380,7 +593,7 @@ namespace coin {
             /**
              * The best block index.
              */
-            static std::shared_ptr<block_index> g_block_index_best;
+            static block_index * g_block_index_best;
         
             /**
              * The best chain trust.
@@ -417,6 +630,33 @@ namespace coin {
             );
         
             /**
+             * Creates a backup of the last wallet file.
+             * @note This deletes the oldest backup from disk.
+             */
+            void backup_last_wallet_file();
+        
+            /**
+             * Trys to lock the lock file or exits.
+             */
+            void lock_file_or_exit();
+        
+            /**
+             * Exports the blk000x.dat files into a blockchain.dat file.
+             */
+            bool export_blockchain_file();
+        
+            /**
+             * Imports a blockchain file from disk.
+             * @param path The path.
+             */
+            bool import_blockchain_file(const std::string & path);
+        
+            /**
+             * Prunes old blocks from disk.
+             */
+            void prune_old_blocks();
+        
+            /**
              * The main loop.
              */
             void loop();
@@ -445,14 +685,7 @@ namespace coin {
             /**
              * The std::recursive_mutex.
              */
-            std::recursive_mutex mutex_;
-        
-            /**
-             * The wallet flush timer.
-             */
-            boost::asio::basic_waitable_timer<
-                std::chrono::steady_clock
-            > timer_wallet_flush_;
+            std::recursive_mutex mutex_callback_;
         
             /**
              * The block status timer.
@@ -474,6 +707,20 @@ namespace coin {
             boost::asio::basic_waitable_timer<
                 std::chrono::steady_clock
             > timer_status_wallet_;
+        
+            /**
+             * The database environment timer.
+             */
+            boost::asio::basic_waitable_timer<
+                std::chrono::steady_clock
+            > timer_database_env_;
+        
+            /**
+             * The (SPV) block_merkle's save timer.
+             */
+            boost::asio::basic_waitable_timer<
+                std::chrono::steady_clock
+            > timer_block_merkles_save_;
     };
     
 } // namespace coin

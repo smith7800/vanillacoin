@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -76,6 +76,16 @@ namespace coin {
              * @param len The length.
              */
             void broadcast(const char * buf, const std::size_t & len);
+
+            /**
+             * Broadcasts a message to all connected peers except bip0037
+             * with relay = false.
+             * @param buf The buffer.
+             * @param len The length.
+             */
+            void broadcast_bip0037(
+                const char * buf, const std::size_t & len
+            );
         
             /**
              * The tcp connections.
@@ -83,6 +93,26 @@ namespace coin {
             std::map<
                 boost::asio::ip::tcp::endpoint, std::weak_ptr<tcp_connection>
             > & tcp_connections();
+        
+            /**
+             * Returns the number of active (open socket) TCP connections.
+             */
+            std::size_t active_tcp_connections();
+        
+            /**
+             * If true we are connected to the network.
+             */
+            bool is_connected();
+        
+            /**
+             * The minimum number of tcp connections to maintain.
+             */
+            std::size_t minimum_tcp_connections();
+            
+            /**
+             * The last time we have accepted an inbound connection.
+             */
+            const std::time_t & time_last_inbound() const;
         
         private:
         
@@ -105,6 +135,11 @@ namespace coin {
                 boost::asio::ip::tcp::endpoint, std::weak_ptr<tcp_connection>
             > m_tcp_connections;
         
+            /**
+             * The last time we have accepted an inbound connection.
+             */
+            std::time_t m_time_last_inbound;
+        
         protected:
         
             /**
@@ -118,9 +153,10 @@ namespace coin {
             );
         
             /**
-             * The minimum number of tcp connections to maintain.
+             * Checks if a partial ip match is banned.
+             * @param val The ip address.
              */
-            enum { minimum_tcp_connections = 8 };
+            bool is_ip_banned(const std::string & val);
         
             /**
              * The boost::asio::io_service.
@@ -130,7 +166,7 @@ namespace coin {
             /**
              * The boost::asio::strand.
              */
-            boost::asio::strand strand_;
+            boost::asio::strand & strand_;
         
             /**
              * The stack_impl.

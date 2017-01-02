@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -21,23 +21,39 @@
 #include <fstream>
 #include <memory>
 #include <stdexcept>
+#include <sstream>
 
 #include <boost/asio.hpp>
 
 #include <openssl/rand.h>
 
 #include <coin/address_manager.hpp>
+#include <coin/database_stack.hpp>
 #include <coin/data_buffer.hpp>
+#include <coin/globals.hpp>
 #include <coin/hash.hpp>
+#include <coin/incentive_answer.hpp>
+#include <coin/incentive_collaterals.hpp>
 #include <coin/filesystem.hpp>
 #include <coin/logger.hpp>
 #include <coin/message.hpp>
 #include <coin/random.hpp>
+#include <coin/stack_impl.hpp>
+#include <coin/tcp_connection.hpp>
+#include <coin/tcp_transport.hpp>
+#include <coin/utility.hpp>
 
 using namespace coin;
 
-address_manager::address_manager()
-    : id_count_(0)
+address_manager::address_manager(
+    boost::asio::io_service & ios, boost::asio::strand & s,
+    stack_impl & owner
+    )
+    : io_service_(ios)
+    , strand_(s)
+    , stack_impl_(owner)
+    , timer_(ios)
+    , id_count_(0)
     , number_tried_(0)
     , number_new_(0)
     , buckets_new_(std::vector< std::set<std::uint32_t> >(
@@ -46,6 +62,7 @@ address_manager::address_manager()
     , buckets_tried_(std::vector< std::vector<std::uint32_t> >(
         64, std::vector<std::uint32_t>(0))
     )
+    , ticks_(0)
 {
     /**
      * Allocate the key.
@@ -71,17 +88,31 @@ void address_manager::start()
         save();
         
         /**
-         * Try again, if thisfails something fatal has occured.
+         * Try again, if this fails something fatal has occured.
          */
         if (load() == false)
         {
             throw std::runtime_error("failed to write empty peers file");
         }
     }
+    
+    /**
+     * Start the timer.
+     */
+    timer_.expires_from_now(std::chrono::seconds(12));
+    timer_.async_wait(strand_.wrap(
+        std::bind(&address_manager::tick, this,
+        std::placeholders::_1))
+    );
 }
 
 void address_manager::stop()
 {
+    /**
+     * Stop the timer.
+     */
+    timer_.cancel();
+    
     /**
      * Save the file.
      */
@@ -90,6 +121,8 @@ void address_manager::stop()
 
 bool address_manager::load()
 {
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+
     std::string path = filesystem::data_path() + "peers.dat";
     
     log_info(
@@ -208,34 +241,35 @@ bool address_manager::load()
              * The number of buckets.
              */
             auto number_buckets = data.read_uint32();
-
+            
+            log_none(
+                "Address manager read version = " << (int)version <<
+                ", key_length = " << (int)key_length << ", number_new = " <<
+                number_new_ << ", number_tried = " <<
+                number_tried_ << ", number_buckets = " << number_buckets << "."
+            );
+            
             assert(number_buckets == 256);
             
             /**
              * Set the id count.
              */
             id_count_ = 0;
-            
-            std::lock_guard<std::recursive_mutex> l1(mutex_random_ids_);
-            
+
             /**
              * Clear the maps.
              */
             address_info_map_.clear();
             network_address_map_.clear();
             random_ids_.clear();
-            
-            std::lock_guard<std::recursive_mutex> l2(mutex_buckets_new_);
-            
+
             /**
              * Allocate the new buckets.
              */
             buckets_new_ = std::vector< std::set<std::uint32_t> >(
                 256, std::set<std::uint32_t>()
             );
-            
-            std::lock_guard<std::recursive_mutex> l3(mutex_buckets_tried_);
-            
+ 
             /**
              * Allocate the tried buckets.
              */
@@ -281,6 +315,13 @@ bool address_manager::load()
                  * Read the last attempts.
                  */
                 info.last_attempts = data.read_uint32();
+                
+                log_none(
+                    "NEW: version = " << (int)info.addr.version <<
+                    ", ep = " << info.addr.ipv4_mapped_address() << ":" <<
+                    info.addr.port << ", last_success = " << info.last_success <<
+                    ", last_attempts = " << info.last_attempts << "."
+                );
 
                 address_info_map_[i] = info;
                 network_address_map_[info.addr] = i;
@@ -343,6 +384,14 @@ bool address_manager::load()
                  * Read the last attempts.
                  */
                 info.last_attempts = data.read_uint32();
+                
+                log_none(
+                    "TRIED: i = " << i << ", version = " <<
+                    (int)info.addr.version << ", ep = " <<
+                    info.addr.ipv4_mapped_address() << ":" << info.addr.port <<
+                    ", last_success = " << info.last_success <<
+                    ", last_attempts = " << info.last_attempts << "."
+                );
                 
                 auto & tried = buckets_tried_[info.calculate_tried_bucket(key_)];
                 
@@ -416,6 +465,8 @@ bool address_manager::load()
 
 void address_manager::save()
 {
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
     /**
      * Allocate the data_buffer.
      */
@@ -459,12 +510,13 @@ void address_manager::save()
     auto nids = 0;
     
     std::map<std::uint32_t, std::uint32_t> unk_ids;
-    
+
     /**
      * Write the new.
      */
     for (
-        auto it = address_info_map_.begin(); it != address_info_map_.end(); ++it
+        auto it = address_info_map_.begin();
+        it != address_info_map_.end(); ++it
         )
     {
         if (nids == number_new_)
@@ -513,7 +565,8 @@ void address_manager::save()
      * Write the tried.
      */
     for (
-        auto it = address_info_map_.begin(); it != address_info_map_.end(); ++it
+        auto it = address_info_map_.begin();
+        it != address_info_map_.end(); ++it
         )
     {
         if (nids == number_tried_)
@@ -554,8 +607,6 @@ void address_manager::save()
         }
     }
 
-    std::lock_guard<std::recursive_mutex> l1(mutex_buckets_new_);
-    
     /**
      * Write the bucket's.
      */
@@ -618,10 +669,79 @@ void address_manager::save()
     ofs.close();
 }
 
+bool address_manager::handle_message(
+    const boost::asio::ip::tcp::endpoint & ep, message & msg
+    )
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    if (msg.header().command == "icols")
+    {
+        if (globals::instance().is_incentive_enabled())
+        {
+            /**
+             * Get the incentive_collaterals.
+             */
+            auto icols = msg.protocol_icols().icols;
+            
+            if (icols)
+            {
+                for (auto & i : icols->collaterals())
+                {                    
+                    /**
+                     * If we do not have a recent good endpoint matching the
+                     * collateral address add it.
+                     */
+                    if (m_recent_good_endpoints.count(i.addr) == 0)
+                    {
+                        recent_endpoint_t recent;
+                        
+                        recent.addr = i.addr;
+                        recent.wallet_address = i.wallet_address;
+                        recent.public_key = i.public_key;
+                        recent.tx_in = i.tx_in;
+                        
+                        recent.time =
+                            std::time(0) + std::rand() % (5 * 60)
+                        ;
+                        recent.protocol_version = i.protocol_version;
+                        recent.protocol_version_user_agent =
+                            i.protocol_version_user_agent
+                        ;
+                        recent.protocol_version_services =
+                            i.protocol_version_services
+                        ;
+                        recent.protocol_version_start_height =
+                            i.protocol_version_start_height
+                        ;
+                        
+                        m_recent_good_endpoints[i.addr] = recent;
+                        
+                        boost::asio::ip::tcp::endpoint ep(
+                            i.addr.ipv4_mapped_address(), i.addr.port
+                        );
+                    
+                        /**
+                         * Set that the endpoint was probed.
+                         */
+                        probed_endpoints_[ep] =
+                            std::time(0) + std::rand() % (5 * 60)
+                        ;
+                    }
+                }
+            }
+        }
+    }
+    
+    return true;
+}
+
 address_manager::address_info_t * address_manager::find(
     const protocol::network_address_t & addr, std::uint32_t * ptr_id
     )
 {
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
     auto it1 = network_address_map_.find(addr);
     
     if (it1 != network_address_map_.end())
@@ -630,7 +750,7 @@ address_manager::address_info_t * address_manager::find(
         {
             *ptr_id = it1->second;
         }
-        
+
         auto it2 = address_info_map_.find(it1->second);
         
         if (it2 != address_info_map_.end())
@@ -646,10 +766,34 @@ protocol::network_address_t address_manager::select(
     const std::uint8_t & unk_bias
     )
 {
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    /**
+     * Randomly return a known good address.
+     */
+    if ((std::rand() & 1) == 0)
+    {
+        std::vector<protocol::network_address_t> recent_good_eps;
+        
+        for (auto & i : m_recent_good_endpoints)
+        {
+            recent_good_eps.push_back(i.first);
+        }
+        
+        std::random_shuffle(
+            recent_good_eps.begin(), recent_good_eps.end()
+        );
+        
+        if (recent_good_eps.size() > 1)
+        {
+            recent_good_eps.resize(1);
+
+            return recent_good_eps[0];
+        }
+    }
+
     assert(unk_bias <= 100);
-    
-    std::lock_guard<std::recursive_mutex> l1(mutex_random_ids_);
-    
+
     if (random_ids_.size() == 0)
     {
         // ...
@@ -669,10 +813,7 @@ protocol::network_address_t address_manager::select(
              * Use an already tried peer.
              */
             double factor_chance = 1.0;
-            
-            std::lock_guard<std::recursive_mutex> l2(mutex_buckets_new_);
-            std::lock_guard<std::recursive_mutex> l3(mutex_buckets_tried_);
-            
+
             while (1)
             {
                 auto bucket_index = random::uint32(
@@ -689,7 +830,7 @@ protocol::network_address_t address_manager::select(
                 auto position = random::uint32(
                     static_cast<std::uint32_t> (bucket_tried.size())
                 );
-
+                
                 assert(address_info_map_.count(bucket_tried[position]) == 1);
                 
                 auto & info = address_info_map_[bucket_tried[position]];
@@ -760,6 +901,8 @@ void address_manager::on_connection_attempt(
     const protocol::network_address_t & addr, const std::uint64_t & timestamp
     )
 {
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
     if (auto * ptr_info = find(addr))
     {
         auto & info = *ptr_info;
@@ -776,9 +919,21 @@ void address_manager::on_connection_attempt(
 }
 
 void address_manager::mark_good(
-    const protocol::network_address_t & addr, const std::uint64_t &  timestamp
+    const protocol::network_address_t & addr, const std::uint64_t & timestamp
     )
 {
+    log_debug(
+        "Address manager is marking " <<
+        addr.ipv4_mapped_address() << ":" << addr.port << " as good."
+    );
+
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    /**
+     * Update the recent good endpoint's time.
+     */
+    m_recent_good_endpoints[addr].time = std::time(0);
+
     std::uint32_t nid;
     
     if (auto * ptr_info = find(addr, &nid))
@@ -804,8 +959,6 @@ void address_manager::mark_good(
             }
             else
             {
-                std::lock_guard<std::recursive_mutex> l1(mutex_buckets_new_);
-                
                 auto rnd = random::uint32(
                     static_cast<std::uint32_t> (buckets_new_.size())
                 );
@@ -851,7 +1004,7 @@ void address_manager::move_to_tried(
     const std::uint32_t & bucket_index
     )
 {
-    std::lock_guard<std::recursive_mutex> l1(mutex_buckets_new_);
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
     
     assert(buckets_new_[bucket_index].count(nid) == 1);
 
@@ -875,8 +1028,6 @@ void address_manager::move_to_tried(
      */
     auto bucket_tried_index = info.calculate_tried_bucket(key_);
     
-    std::lock_guard<std::recursive_mutex> l2(mutex_buckets_tried_);
-    
     auto & bucket_tried = buckets_tried_[bucket_tried_index];
 
     /**
@@ -896,7 +1047,7 @@ void address_manager::move_to_tried(
          * Try to find an entry to evict.
          */
         auto position = select_tried(bucket_tried_index);
-
+        
         /**
          * Find which new bucket it belongs to.
          */
@@ -976,14 +1127,14 @@ address_manager::address_info_t & address_manager::create(
     const protocol::network_address_t  & addr_src, std::uint32_t  * ptr_id
     )
 {
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
     auto nid = id_count_++;
     address_info_map_[nid] = address_info_t::init(addr, addr_src);
     network_address_map_[addr] = nid;
     address_info_map_[nid].random_position =
         static_cast<std::uint32_t> (random_ids_.size())
     ;
-    
-    std::lock_guard<std::recursive_mutex> l1(mutex_random_ids_);
     
     random_ids_.push_back(nid);
     
@@ -1001,6 +1152,8 @@ bool address_manager::add(
     const std::uint64_t & time_penalty
     )
 {
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
     bool ret = false;
     
     if (addr.is_valid() == false)
@@ -1010,7 +1163,7 @@ bool address_manager::add(
             addr.ipv4_mapped_address() << "."
         );
     }
-    else if (addr.is_routable() == false)
+    else if (constants::test_net == false && addr.is_routable() == false)
     {
         log_debug(
             "Address manager unable to add non-routable address = " <<
@@ -1123,8 +1276,6 @@ bool address_manager::add(
             key_, addr_src
         );
         
-        std::lock_guard<std::recursive_mutex> l1(mutex_buckets_new_);
-        
         auto & bucket = buckets_new_[index_bucket];
         
         if (bucket.count(nid) == 0)
@@ -1147,9 +1298,9 @@ std::vector<protocol::network_address_t> address_manager::get_addr(
     const std::size_t & count
     )
 {
-    std::vector<protocol::network_address_t> ret;
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
     
-    std::lock_guard<std::recursive_mutex> l1(mutex_random_ids_);
+    std::vector<protocol::network_address_t> ret;
     
     /**
      * Return at most 23% of the addresses.
@@ -1172,25 +1323,77 @@ std::vector<protocol::network_address_t> address_manager::get_addr(
         ;
         
         swap_random(n, position);
-        
+
         assert(address_info_map_.count(random_ids_[n]) == 1);
         
         ret.push_back(address_info_map_[random_ids_[n]].addr);
     }
+    
+    /**
+     * Add some recently known good endpoints.
+     */
+
+    std::vector<protocol::network_address_t> recent_good_eps;
+    
+    for (auto & i : m_recent_good_endpoints)
+    {
+        recent_good_eps.push_back(i.first);
+    }
+    
+    std::random_shuffle(
+        recent_good_eps.begin(), recent_good_eps.end()
+    );
+    
+    if (recent_good_eps.size() > 8)
+    {
+        recent_good_eps.resize(8);
+
+        ret.insert(
+            ret.begin(), recent_good_eps.begin(), recent_good_eps.end()
+        );
+    }
+    
+    std::random_shuffle(ret.begin(), ret.end());
     
     return ret;
 }
 
 const std::size_t address_manager::size() const
 {
-    std::lock_guard<std::recursive_mutex> l1(mutex_random_ids_);
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
     
     return random_ids_.size();
 }
 
+std::vector<address_manager::recent_endpoint_t>
+    address_manager::recent_good_endpoints()
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    std::vector<address_manager::recent_endpoint_t> ret;
+
+    for (auto & i : m_recent_good_endpoints)
+    {
+        ret.push_back(i.second);
+    }
+
+    return ret;
+}
+
+void address_manager::print()
+{
+    log_debug("m_recent_good_endpoints = " << m_recent_good_endpoints.size());
+    log_debug("key_ = " << key_.size());
+    log_debug("address_info_map_ = " << address_info_map_.size());
+    log_debug("network_address_map_ = " << network_address_map_.size());
+    log_debug("buckets_new_ = " << buckets_new_.size());
+    log_debug("buckets_tried_ = " << buckets_tried_.size());
+    log_debug("probed_endpoints_ = " << probed_endpoints_.size());
+}
+
 std::int32_t address_manager::select_tried(const std::uint32_t & bucket_index)
 {
-    std::lock_guard<std::recursive_mutex> l1(mutex_buckets_tried_);
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
     
     auto & bucket_tried = buckets_tried_[bucket_index];
 
@@ -1227,7 +1430,7 @@ std::int32_t address_manager::select_tried(const std::uint32_t & bucket_index)
 
 void address_manager::shrink_bucket_new(const std::uint32_t & index)
 {
-    std::lock_guard<std::recursive_mutex> l1(mutex_buckets_new_);
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
     
     assert(index >= 0 && index < buckets_new_.size());
     
@@ -1246,8 +1449,6 @@ void address_manager::shrink_bucket_new(const std::uint32_t & index)
         {
             if (--info.reference_count == 0)
             {
-                std::lock_guard<std::recursive_mutex> l1(mutex_random_ids_);
-                
                 swap_random(
                     info.random_position,
                     static_cast<std::uint32_t> (random_ids_.size() - 1)
@@ -1305,8 +1506,6 @@ void address_manager::shrink_bucket_new(const std::uint32_t & index)
     
     if (--info.reference_count == 0)
     {
-        std::lock_guard<std::recursive_mutex> l1(mutex_random_ids_);
-        
         swap_random(
             info.random_position,
             static_cast<std::uint32_t> (random_ids_.size() - 1)
@@ -1324,14 +1523,14 @@ void address_manager::swap_random(
     const std::uint32_t & first, const std::uint32_t & second
     )
 {
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
     if (first == second)
     {
         // ...
     }
     else
     {
-        std::lock_guard<std::recursive_mutex> l1(mutex_random_ids_);
-        
         assert(first < random_ids_.size() && second < random_ids_.size());
 
         int nid1 = random_ids_[first];
@@ -1345,5 +1544,499 @@ void address_manager::swap_random(
 
         random_ids_[first] = nid2;
         random_ids_[second] = nid1;
+    }
+}
+
+void address_manager::tick(const boost::system::error_code & ec)
+{
+    if (ec)
+    {
+        // ...
+    }
+    else
+    {
+        std::lock_guard<std::recursive_mutex> l1(mutex_);
+        
+        auto is_initial_block_download =
+            globals::instance().is_client_spv() ?
+            utility::is_spv_initial_block_download() :
+            utility::is_initial_block_download()
+        ;
+        
+        if (is_initial_block_download == false)
+        {
+            /**
+             * Only keep recent good endpoints that are less than N hours old.
+             */
+            auto it1 = m_recent_good_endpoints.begin();
+            
+            while (it1 != m_recent_good_endpoints.end())
+            {
+                if (std::time(0) - it1->second.time > (3 * 60 * 60))
+                {
+                    it1 = m_recent_good_endpoints.erase(it1);
+                }
+                else
+                {
+                    ++it1;
+                }
+            }
+            
+            std::stringstream ss;
+            
+            auto index = 0;
+            
+            for (auto & i : m_recent_good_endpoints)
+            {
+                ss <<
+                    "\t" << ++index << ". " << i.first.ipv4_mapped_address() <<
+                    ":" << i.first.port << ":" <<
+                    ((std::time(0) - i.second.time) < 0 ? 0 :
+                    (std::time(0) - i.second.time)) <<
+                    ":" << i.second.protocol_version << ":" <<
+                    i.second.protocol_version_user_agent << ":" <<
+                    i.second.protocol_version_services << ":" <<
+                    i.second.protocol_version_start_height << "\n"
+                ;
+            }
+            
+            log_debug("Address manager recent good endpoints:\n" << ss.str());
+            
+            /**
+             * If we have not been able to probe an endpoint after N hours
+             * erase it.
+             */
+            auto it2 = probed_endpoints_.begin();
+            
+            while (it2 != probed_endpoints_.end())
+            {
+                if (std::time(0) - it2->second > (3 * 60 * 60))
+                {
+                    it2 = probed_endpoints_.erase(it2);
+                }
+                else
+                {
+                    ++it2;
+                }
+            }
+            
+            /**
+             * If some time has elapsed then the node needs probing.
+             */
+            std::vector<boost::asio::ip::tcp::endpoint> endpoints;
+            
+            auto eps = stack_impl_.get_database_stack()->endpoints();
+
+            for (auto & i : eps)
+            {
+                try
+                {
+                    boost::asio::ip::tcp::endpoint ep(
+                        boost::asio::ip::address::from_string(i.first),
+                        i.second
+                    );
+                    
+                    if (probed_endpoints_.count(ep) > 0)
+                    {
+                        if (std::time(0) - probed_endpoints_[ep] >= (60 * 60))
+                        {
+                            endpoints.push_back(ep);
+                        }
+                    }
+                    else
+                    {
+                        endpoints.push_back(ep);
+                    }
+                }
+                catch (...)
+                {
+                    // ...
+                }
+            }
+
+            std::random_shuffle(endpoints.begin(), endpoints.end());
+            
+            enum { max_probes_new = 32 };
+            
+            if (endpoints.size() > max_probes_new)
+            {
+                endpoints.resize(max_probes_new);
+            }
+
+            auto addrs = get_addr(8);
+            
+            for (auto & i : addrs)
+            {
+                boost::asio::ip::tcp::endpoint ep(
+                    i.ipv4_mapped_address(), i.port
+                );
+                
+                if (probed_endpoints_.count(ep) > 0)
+                {
+                    if (std::time(0) - probed_endpoints_[ep] >= (60 * 60))
+                    {
+                        endpoints.push_back(ep);
+                    }
+                }
+                else
+                {
+                    endpoints.push_back(ep);
+                }
+            }
+
+            std::sort(endpoints.begin(), endpoints.end());
+            endpoints.erase(
+                std::unique(endpoints.begin(), endpoints.end()),
+                endpoints.end()
+            );
+            
+            std::random_shuffle(endpoints.begin(), endpoints.end());
+
+            auto max_probes_total =
+                globals::instance().is_client_spv() == true ?
+                3 : max_probes_new
+            ;
+            
+            if (endpoints.size() > max_probes_total)
+            {
+                endpoints.resize(max_probes_total);
+            }
+
+            /**
+             * Always probe (some of) the recent good endpoints.
+             */
+            for (auto & i : m_recent_good_endpoints)
+            {
+                if (std::time(0) - i.second.time >= (60 * 60))
+                {
+                    endpoints.push_back(
+                        boost::asio::ip::tcp::endpoint(
+                        i.first.ipv4_mapped_address(), i.first.port)
+                    );
+                }
+            }
+
+            std::sort(endpoints.begin(), endpoints.end());
+            endpoints.erase(
+                std::unique(endpoints.begin(), endpoints.end()),
+                endpoints.end()
+            );
+            
+            std::random_shuffle(endpoints.begin(), endpoints.end());
+            
+            if (endpoints.size() > max_probes_total)
+            {
+                endpoints.resize(max_probes_total);
+            }
+            
+            auto probed = 0;
+            
+            for (auto & i : endpoints)
+            {
+                /**
+                 * Allocate tcp_transport.
+                 */
+                auto transport =
+                    std::make_shared<tcp_transport> (io_service_, strand_)
+                ;
+                
+                /**
+                 * Allocate the tcp_connection.
+                 */
+                auto connection = std::make_shared<tcp_connection> (
+                    io_service_, stack_impl_,
+                    tcp_connection::direction_outgoing, transport
+                );
+
+                auto should_probe = true;
+                
+                if (probed_endpoints_.count(i) > 0)
+                {
+                    if (std::time(0) - probed_endpoints_[i] >= (60 * 60))
+                    {
+                        should_probe = true;
+                    }
+                    else
+                    {
+                        should_probe = false;
+                    }
+                }
+                
+                if (should_probe)
+                {
+                    if (probed_endpoints_.count(i) > 0)
+                    {
+                        log_debug(
+                            "Address manager is probing " << i <<
+                            ", last = " << std::time(0) -
+                            probed_endpoints_[i] << " seconds."
+                        );
+                    }
+                    
+                    /**
+                     * Increment the number we've probed so far.
+                     */
+                    probed++;
+                    
+                    /**
+                     * If the endpoint doesn't exist add it.
+                     */
+                    if (
+                        find(
+                        protocol::network_address_t::from_endpoint(i)) == 0
+                        )
+                    {
+                        add(
+                            protocol::network_address_t::from_endpoint(i),
+                            protocol::network_address_t::from_endpoint(i)
+                        );
+                    }
+                    
+                    /**
+                     * Inform the address_manager.
+                     */
+                    on_connection_attempt(
+                        protocol::network_address_t::from_endpoint(i),
+                        std::time(0) - (20 * 60)
+                    );
+                    
+                    /**
+                     * Set that this is a probe only connection.
+                     */
+                    connection->set_probe_only(true);
+                    
+                    /**
+                     * Retain the time the endpoint was probed.
+                     */
+                    probed_endpoints_[i] = std::time(0);
+                    
+                    /**
+                     * Set the probe callback.
+                     */
+                    connection->set_on_probe(
+                        [this, i](
+                            const std::uint32_t & protocol_version,
+                            const std::string & protocol_version_user_agent,
+                            const std::uint64_t & protocol_version_services,
+                            const std::int32_t & protocol_version_start_height
+                            )
+                        {
+                            log_debug(
+                                "Address manager probed " << i << ":" <<
+                                protocol_version << ":" <<
+                                protocol_version_user_agent << ":" <<
+                                protocol_version_services << ":" <<
+                                protocol_version_start_height << "."
+                            );
+                            
+                            if (
+                                m_recent_good_endpoints.count(
+                                protocol::network_address_t::from_endpoint(
+                                i)) > 0
+                                )
+                            {
+                                recent_endpoint_t & recent =
+                                    m_recent_good_endpoints[
+                                    protocol::network_address_t::from_endpoint(
+                                    i)]
+                                ;
+                                
+                                recent.addr =
+                                    protocol::network_address_t::from_endpoint(
+                                    i)
+                                ;
+                                recent.time =
+                                    std::time(0) + std::rand() % (5 * 60)
+                                ;
+                                recent.protocol_version = protocol_version;
+                                recent.protocol_version_user_agent =
+                                    protocol_version_user_agent
+                                ;
+                                recent.protocol_version_services =
+                                    protocol_version_services
+                                ;
+                                recent.protocol_version_start_height =
+                                    protocol_version_start_height
+                                ;
+                            }
+                            else
+                            {
+                                recent_endpoint_t recent;
+                                
+                                recent.addr =
+                                    protocol::network_address_t::from_endpoint(
+                                    i)
+                                ;
+
+                                recent.time =
+                                    std::time(0) + std::rand() % (5 * 60)
+                                ;
+                                recent.protocol_version = protocol_version;
+                                recent.protocol_version_user_agent =
+                                    protocol_version_user_agent
+                                ;
+                                recent.protocol_version_services =
+                                    protocol_version_services
+                                ;
+                                recent.protocol_version_start_height =
+                                    protocol_version_start_height
+                                ;
+                                
+                                m_recent_good_endpoints[
+                                    protocol::network_address_t::from_endpoint(
+                                    i)
+                                ] = recent;
+                            }
+                        }
+                    );
+
+                    /**
+                     * Set the ianswer callback.
+                     */
+                    connection->set_on_ianswer(
+                        [this, i](
+                            const incentive_answer & ianswer
+                            )
+                        {
+                            log_debug("Address manager got ianswer.");
+                            
+                            if (
+                                m_recent_good_endpoints.count(
+                                protocol::network_address_t::from_endpoint(
+                                i)) > 0
+                                )
+                            {
+                                recent_endpoint_t & recent =
+                                    m_recent_good_endpoints[
+                                    protocol::network_address_t::from_endpoint(
+                                    i)]
+                                ;
+                                
+                                recent.addr =
+                                    protocol::network_address_t::from_endpoint(
+                                    i)
+                                ;
+                                recent.public_key = ianswer.public_key();
+                                recent.wallet_address = ianswer.get_address();
+                                recent.tx_in = ianswer.get_transaction_in();
+                                recent.time =
+                                    std::time(0) + std::rand() % (5 * 60)
+                                ;
+                            }
+                            else
+                            {
+                                recent_endpoint_t recent;
+                                
+                                recent.addr =
+                                    protocol::network_address_t::from_endpoint(i)
+                                ;
+                                recent.public_key = ianswer.public_key();
+                                recent.wallet_address = ianswer.get_address();
+                                recent.tx_in = ianswer.get_transaction_in();
+
+                                recent.time =
+                                    std::time(0) + std::rand() % (5 * 60)
+                                ;
+                                
+                                m_recent_good_endpoints[
+                                    protocol::network_address_t::from_endpoint(
+                                    i)
+                                ] = recent;
+                            }
+                        }
+                    );
+
+                    /**
+                     * Start the tcp_connection.
+                     */
+                    connection->start(i);
+                }
+                else
+                {
+                    log_debug(
+                        "Address manager is not probing " << i << ", too soon."
+                    );
+                }
+                
+                if (probed == max_probes_total)
+                {
+                    break;
+                }
+            }
+            
+            log_info("Address manager probed " << probed << " endpoints.");
+            
+            /**
+             * The number of minimum good endpoints to maintain.
+             */
+            auto min_good_endpoints =
+                globals::instance().is_client_spv() == true ? 6 : 24
+            ;
+            
+            auto interval = 8;
+            
+            if (
+                globals::instance().operation_mode() ==
+                protocol::operation_mode_peer
+                )
+            {
+                if (ticks_ < 20)
+                {
+                    interval = 8;
+                }
+                else
+                {
+                    interval =
+                        m_recent_good_endpoints.size() < min_good_endpoints ?
+                        (4 * 60) : (8 * 60)
+                    ;
+                }
+            }
+            else
+            {
+                if (ticks_ < 20)
+                {
+                    interval =
+                        m_recent_good_endpoints.size() < min_good_endpoints ?
+                        8 : (10 * 60)
+                    ;
+                }
+                else
+                {
+                    interval =
+                        m_recent_good_endpoints.size() < min_good_endpoints ?
+                        (8 * 60) : (20 * 60)
+                    ;
+                }
+            }
+            
+            /**
+             * Start the timer.
+             */
+            timer_.expires_from_now(std::chrono::seconds(interval));
+            timer_.async_wait(strand_.wrap(
+                std::bind(&address_manager::tick, this, std::placeholders::_1))
+            );
+            
+            /**
+             * Increment the number of ticks.
+             */
+            ticks_++;
+        }
+        else
+        {
+            /**
+             * Start the timer.
+             */
+            timer_.expires_from_now(std::chrono::seconds(60));
+            timer_.async_wait(strand_.wrap(
+                std::bind(&address_manager::tick, this, std::placeholders::_1))
+            );
+        }
+        
+        /**
+         * Print
+         */
+        print();
     }
 }

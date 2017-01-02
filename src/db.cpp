@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -40,6 +40,7 @@ db::db(const std::string & file_name, const std::string & file_mode
     , m_file_name(file_name)
     , m_Db(0)
     , m_DbTxn(0)
+    , state_(state_none)
 {
     int ret;
 
@@ -47,7 +48,7 @@ db::db(const std::string & file_name, const std::string & file_mode
         !strchr(file_mode.c_str(), '+') && !strchr(file_mode.c_str(), 'w')
     );
     
-    bool db_create = strchr(file_mode.c_str(), 'c');
+    auto db_create = strchr(file_mode.c_str(), 'c');
     
     std::int32_t flags = DB_THREAD;
     
@@ -55,6 +56,11 @@ db::db(const std::string & file_name, const std::string & file_mode
     {
         flags |= DB_CREATE;
     }
+    
+    /**
+     * Make sure no other threads can access the db_env for this scope.
+     */
+    std::lock_guard<std::recursive_mutex> l1(db_env::mutex_DbEnv());
     
     if (stack_impl::get_db_env()->open() == false)
     {
@@ -89,7 +95,7 @@ db::db(const std::string & file_name, const std::string & file_mode
         
         if (db_create && exists("version") == false)
         {
-            bool tmp = m_is_read_only;
+            auto tmp = m_is_read_only;
             
             m_is_read_only = false;
             
@@ -100,20 +106,16 @@ db::db(const std::string & file_name, const std::string & file_mode
 
         stack_impl::get_db_env()->Dbs()[file_name] = m_Db;
     }
+
+    /**
+     * Set state to state_opened.
+     */
+    state_ = state_opened;
 }
 
 db::~db()
 {
-    /**
-     * If the application state is stopping the destructor should not close
-     * the database as the owner should have done so cleanly This is used for
-     * RAII.
-     */
-    if (globals::instance().state() >= globals::state_stopping)
-    {
-        // ...
-    }
-    else
+    if (state_ == state_opened)
     {
         close();
     }
@@ -121,25 +123,24 @@ db::~db()
 
 void db::close()
 {
-    if (m_Db)
+    if (m_Db && state_ == state_opened)
     {
+        /**
+         * Set state to state_closed.
+         */
+        state_ = state_closed;
+        
         if (m_DbTxn)
         {
-            m_DbTxn->abort();
-        
-            m_DbTxn = 0;
+            m_DbTxn->abort(), m_DbTxn = 0;
         }
         
-        /**
-         * The reference implementation sets this to null but does not delete
-         * it here or in a destructor.
-         */
         m_Db = 0;
         
         /**
          * Flush database activity from memory pool to disk log.
          */
-        std::uint32_t minutes = 0;
+        auto minutes = 0;
 
         if (m_is_read_only)
         {
@@ -158,12 +159,23 @@ void db::close()
         {
             minutes = 5;
         }
-        
-        stack_impl::get_db_env()->get_DbEnv().txn_checkpoint(
-            minutes ? 100 * 1024 : 0, minutes, 0
-        );
 
-        --stack_impl::get_db_env()->file_use_counts()[m_file_name];
+        /**
+         * Make sure no other threads can access the db_env for this scope.
+         */
+        std::lock_guard<std::recursive_mutex> l1(db_env::mutex_DbEnv());
+    
+        if (stack_impl::get_db_env())
+        {
+            /**
+             * -dblogsize
+             */
+            stack_impl::get_db_env()->get_DbEnv().txn_checkpoint(
+                minutes ? 100 * 1024 : 0, minutes, 0
+            );
+
+            --stack_impl::get_db_env()->file_use_counts()[m_file_name];
+        }
     }
 }
 
@@ -360,6 +372,7 @@ bool db::rewrite(const std::string & file_name, const char * key_skip)
                         
                         break;
                     }
+                    
                     if (
                         key_skip && std::strncmp(key.data(), key_skip,
                         std::min(key.size(), std::strlen(key_skip))) == 0
@@ -445,6 +458,11 @@ bool db::rewrite(const std::string & file_name, const char * key_skip)
     }
     
     return false;
+}
+
+const std::string & db::file_name() const
+{
+    return m_file_name;
 }
 
 bool db::write_version(const std::int32_t & version)

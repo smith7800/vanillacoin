@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -22,9 +22,12 @@
 #define COIN_DB_HPP
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 #include <db_cxx.h>
+
+#include <boost/noncopyable.hpp>
 
 #include <coin/data_buffer.hpp>
 #include <coin/key_pool.hpp>
@@ -37,7 +40,7 @@ namespace coin {
     /**
      * Implements a berkley database Db object wrapper.
      */
-    class db
+    class db : private boost::noncopyable
     {
         public:
         
@@ -293,6 +296,8 @@ namespace coin {
 
                 data_buffer key_data;
 
+                key_data.reserve(1000);
+                
                 key_data.write_var_int(k1.size());
                 key_data.write_bytes(k1.data(), k1.size());
                 key_data.write_var_int(k2.size());
@@ -305,6 +310,8 @@ namespace coin {
                 
                 data_buffer value_data;
 
+                value_data.reserve(10000);
+                
                 value_data.write_var_int(value.size());
                 value_data.write_bytes(value.data(), value.size());
 
@@ -350,6 +357,8 @@ namespace coin {
                 auto k2 = key.second;
                 
                 data_buffer key_data;
+                
+                key_data.reserve(1000);
 
                 key_data.write_var_int(k1.size());
                 key_data.write_bytes(k1.data(), k1.size());
@@ -362,6 +371,8 @@ namespace coin {
                 
                 data_buffer value_data;
 
+                value_data.reserve(10000);
+                
                 value.encode(value_data);
 
                 Dbt dat_value(
@@ -407,6 +418,8 @@ namespace coin {
                 
                 data_buffer key_data;
 
+                key_data.reserve(1000);
+                
                 key_data.write_var_int(k1.size());
                 key_data.write_bytes(k1.data(), k1.size());
                 key_data.write_int64(k2);
@@ -418,6 +431,8 @@ namespace coin {
                 
                 data_buffer value_data;
 
+                value_data.reserve(10000);
+                
                 value.encode(value_data);
 
                 Dbt dat_value(
@@ -463,6 +478,8 @@ namespace coin {
                 
                 data_buffer key_data;
 
+                key_data.reserve(1000);
+                
                 key_data.write_var_int(k1.size());
                 key_data.write_bytes(k1.data(), k1.size());
                 key_data.write_uint32(k2);
@@ -474,6 +491,8 @@ namespace coin {
                 
                 data_buffer value_data;
 
+                value_data.reserve(10000);
+                
                 value.encode(value_data);
 
                 Dbt dat_value(
@@ -581,6 +600,8 @@ namespace coin {
                 
                 data_buffer key_data;
 
+                key_data.reserve(1000);
+                
                 key_data.write_var_int(k1.size());
                 key_data.write_bytes(k1.data(), k1.size());
                 key_data.write_var_int(k2.size());
@@ -595,6 +616,8 @@ namespace coin {
                 
                 data_buffer value_data;
 
+                value_data.reserve(10000);
+                
                 value_data.write_var_int(value.size());
                 value_data.write_bytes(
                     reinterpret_cast<const char *>(&value[0]), value.size()
@@ -639,6 +662,8 @@ namespace coin {
                 
                 data_buffer key_data;
 
+                key_data.reserve(1000);
+                
                 key_data.write_var_int(key.size());
                 key_data.write((void *)key.data(), key.size());
 
@@ -649,6 +674,8 @@ namespace coin {
                 
                 data_buffer value_data;
 
+                value_data.reserve(10000);
+                
                 value_data.write_var_int(value.size());
                 value_data.write_bytes(
                     reinterpret_cast<const char *>(&value[0]), value.size()
@@ -694,6 +721,8 @@ namespace coin {
                 
                 data_buffer key_data;
 
+                key_data.reserve(1000);
+                
                 key_data.write_var_int(key.size());
                 key_data.write((void *)key.data(), key.size());
 
@@ -704,6 +733,8 @@ namespace coin {
 
                 data_buffer value_data;
 
+                value_data.reserve(10000);
+                
                 value_data.write(
                     const_cast<void *> (static_cast<const void *> (&value)),
                     sizeof(value)
@@ -764,6 +795,8 @@ namespace coin {
                 auto k2 = key.second;
                 
                 data_buffer key_data;
+                
+                key_data.reserve(1000);
 
                 key_data.write_var_int(k1.size());
                 key_data.write_bytes(k1.data(), k1.size());
@@ -818,6 +851,8 @@ namespace coin {
                 
                 data_buffer buffer;
 
+                buffer.reserve(1000);
+                
                 buffer.write_var_int(key.size());
                 buffer.write_bytes(key.data(), key.size());
     
@@ -840,6 +875,11 @@ namespace coin {
             bool static rewrite(
                 const std::string & file_name, const char * key_skip = 0
             );
+        
+            /**
+             * The file name.
+             */
+            const std::string & file_name() const;
         
         private:
         
@@ -873,6 +913,21 @@ namespace coin {
              * @param version The version.
              */
             bool write_version(const std::int32_t & version);
+        
+            /**
+             * The state.
+             */
+            enum
+            {
+                state_none,
+                state_opened,
+                state_closed,
+            } state_;
+        
+            /**
+             * The std::mutex.
+             */
+            std::mutex mutex_;
     };
 }
 

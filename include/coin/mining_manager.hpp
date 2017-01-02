@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -119,9 +119,14 @@ namespace coin {
 
             /**
              * The main loop.
-             * @param is_proof_of_stake If true it is stake.
              */
-            void loop(const bool & is_proof_of_stake);
+            void loop();
+        
+            /**
+             * The Proof-of-Stake timer handler.
+             * @param ec The boost::system::error_code.
+             */
+            void pos_tick(const boost::system::error_code & ec);
         
             /**
              * The state_pow_t.
@@ -165,8 +170,7 @@ namespace coin {
              * @param extra_nonce The extra nonce.
              */
             void increment_extra_nonce(
-                std::shared_ptr<block> & blk,
-                std::shared_ptr<block_index> & index_previous,
+                std::shared_ptr<block> & blk, block_index * index_previous,
                 std::uint32_t & extra_nonce
             );
         
@@ -178,7 +182,7 @@ namespace coin {
             /**
              * The boost::asio::strand.
              */
-            boost::asio::strand strand_;
+            boost::asio::strand & strand_;
         
             /**
              * The stack_impl.
@@ -196,9 +200,11 @@ namespace coin {
             std::vector< std::shared_ptr<std::thread> > threads_;
         
             /**
-             * The (Proof-of-Stake) thread.
+             * The Proof-of-Stake timer.
              */
-            std::thread thread_pos_;
+            boost::asio::basic_waitable_timer<
+                std::chrono::steady_clock
+            > timer_pos_;
     };
     
 } // namespace coin

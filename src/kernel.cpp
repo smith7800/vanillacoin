@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -38,7 +38,11 @@ std::map<std::uint32_t, std::uint32_t> kernel::get_stake_modifier_checkpoints()
     return
     {
         {0, 234907403}, {8300, 3018973908}, {14800, 1009362736},
-        {17200, 4136115215}, {22927, 484495706}, {25037, 900726625}
+        {17200, 4136115215}, {22927, 484495706}, {25037, 900726625},
+        {39000, 609821848}, {42645, 2936275370}, {44709, 2109139941},
+        {50300, 1665296579}, {73568, 2497364874}, {100000, 2865615596},
+        {113965, 1724769535}, {127440, 3104372474}, {193110, 1390052349},
+        {193112, 1339423347}
     };
 }
 
@@ -60,9 +64,7 @@ const std::uint32_t & kernel::get_modifier_interval() const
     return m_modifier_interval;
 }
 
-std::uint32_t kernel::get_stake_modifier_checksum(
-    const std::shared_ptr<block_index> & index
-    )
+std::uint32_t kernel::get_stake_modifier_checksum(const block_index * index)
 {
     assert(
         index->block_index_previous() ||
@@ -98,7 +100,7 @@ std::uint32_t kernel::get_stake_modifier_checksum(
 
 bool kernel::compute_next_stake_modifier(
     const std::uint32_t & block_position,
-    const std::shared_ptr<block_index> & index_previous,
+    const block_index * index_previous,
     std::uint64_t & stake_modifier, bool & generated_stake_modifier
     )
 {
@@ -134,6 +136,14 @@ bool kernel::compute_next_stake_modifier(
         return false;
     }
     
+    if (globals::instance().debug())
+    {
+        log_none(
+            "Kernel, previous stake modifier = " << stake_modifier <<
+            ", time = " << modifier_time << "."
+        );
+    }
+    
     if (
         modifier_time / m_modifier_interval >=
         index_previous->time() / m_modifier_interval
@@ -148,19 +158,19 @@ bool kernel::compute_next_stake_modifier(
     std::vector< std::pair<std::int64_t, sha256> > sorted_by_timestamp;
 
     sorted_by_timestamp.reserve(
-        64 * m_modifier_interval / constants::work_and_stake_target_spacing
+        64 * m_modifier_interval / utility::get_target_spacing(index_previous)
     );
     
     auto selection_interval = get_stake_modifier_selection_interval();
     
-    auto selection_intervalStart =
+    auto selection_interval_start =
         (index_previous->time() / m_modifier_interval) *
         m_modifier_interval - selection_interval
     ;
     
-    auto index_tmp = std::make_shared<block_index> (*index_previous);
+    auto * index_tmp = index_previous;
     
-    while (index_tmp && index_tmp->time() >= selection_intervalStart)
+    while (index_tmp && index_tmp->time() >= selection_interval_start)
     {
         sorted_by_timestamp.push_back(
             std::make_pair(index_tmp->time(), index_tmp->get_block_hash())
@@ -182,9 +192,9 @@ bool kernel::compute_next_stake_modifier(
      */
     std::uint64_t stake_modifier_new = 0;
     
-    std::int64_t selection_intervalStop = selection_intervalStart;
+    std::int64_t selection_interval_stop = selection_interval_start;
     
-    std::map<sha256, std::shared_ptr<block_index> > selected_blocks;
+    std::map<sha256, block_index *> selected_blocks;
     
     for (
         auto i = 0; i <
@@ -195,7 +205,7 @@ bool kernel::compute_next_stake_modifier(
         /**
          * Add an interval section to the current selection round.
          */
-        selection_intervalStop +=
+        selection_interval_stop +=
             get_stake_modifier_selection_interval_section(i)
         ;
         
@@ -204,8 +214,8 @@ bool kernel::compute_next_stake_modifier(
          */
         if (
             select_block_from_candidates(sorted_by_timestamp,
-            selected_blocks, selection_intervalStop, stake_modifier,
-            index_tmp) == false
+            selected_blocks, selection_interval_stop, stake_modifier,
+            &index_tmp) == false
             )
         {
             log_error(
@@ -227,12 +237,26 @@ bool kernel::compute_next_stake_modifier(
          * Add the selected block from candidates to selected list.
          */
         selected_blocks.insert(
-            std::make_pair(index_tmp->get_block_hash(), index_tmp)
+            std::make_pair(index_tmp->get_block_hash(),
+            const_cast<block_index *> (index_tmp))
         );
+        
+        /**
+         * -printstakemodifier
+         */
+        if (globals::instance().debug())
+        {
+            log_none(
+                "Kernel, selected round " << i << ", stop = " <<
+                selection_interval_stop << ", height = " << index_tmp->height() <<
+                ", bit = " << index_tmp->get_stake_entropy_bit() << "."
+            );
+        }
     }
     
     /**
      * Print selection map for visualization of the selected blocks.
+     * -printstakemodifier
      */
     if (globals::instance().debug())
     {
@@ -245,7 +269,7 @@ bool kernel::compute_next_stake_modifier(
             0, index_previous->height() - height_first_candidate + 1, '-'
         );
         
-        index_tmp = std::make_shared<block_index> (*index_previous);
+        index_tmp = index_previous;
         
         while (index_tmp && index_tmp->height() >= height_first_candidate)
         {
@@ -273,6 +297,20 @@ bool kernel::compute_next_stake_modifier(
                 i.second->is_proof_of_stake()? "S" : "W"
             );
         }
+        
+        log_none(
+            "Kernel, compute next stake modifier, selection height [" <<
+            height_first_candidate << ", " << index_previous->height() <<
+            "] map " << selection_map << "."
+        );
+    }
+    
+    if (globals::instance().debug())
+    {
+        log_none(
+            "Kernel, new modifier = " << stake_modifier_new << ", time = " <<
+            index_previous->time() << "."
+        );
     }
 
     stake_modifier = stake_modifier_new;
@@ -303,8 +341,8 @@ bool kernel::check_coin_stake_timestamp(
 }
 
 bool kernel::get_last_stake_modifier(
-    const std::shared_ptr<block_index> & index,
-    std::uint64_t & stake_modifier, std::int64_t & modifier_time
+    const block_index * index, std::uint64_t & stake_modifier,
+    std::int64_t & modifier_time
     )
 {
     if (index == 0)
@@ -314,17 +352,15 @@ bool kernel::get_last_stake_modifier(
         return false;
     }
     
-    auto index_tmp = std::make_shared<block_index> (*index);
-    
     while (
-        index_tmp && index_tmp->block_index_previous() &&
-        index_tmp->generated_stake_modifier() == false
+        index && index->block_index_previous() &&
+        index->generated_stake_modifier() == false
         )
     {
-        index_tmp = index_tmp->block_index_previous();
+        index = index->block_index_previous();
     }
     
-    if (index_tmp->generated_stake_modifier() == false)
+    if (index->generated_stake_modifier() == false)
     {
         log_error(
             "Kernel get last stake modifier failed, no generation at genesis "
@@ -334,9 +370,9 @@ bool kernel::get_last_stake_modifier(
         return false;
     }
     
-    stake_modifier = index_tmp->stake_modifier();
+    stake_modifier = index->stake_modifier();
     
-    modifier_time = index_tmp->time();
+    modifier_time = index->time();
     
     return true;
 }
@@ -370,17 +406,17 @@ std::int64_t kernel::get_stake_modifier_selection_interval()
 
 bool kernel::select_block_from_candidates(
     std::vector<std::pair<std::int64_t, sha256> > & sorted_by_timestamp,
-    std::map<sha256, std::shared_ptr<block_index> > & selected_blocks,
+    std::map<sha256, block_index *> & selected_blocks,
     const std::int64_t & selection_interval_stop,
     const std::uint64_t & previous_stake_modifier,
-    std::shared_ptr<block_index> & index_selected
+    const block_index ** index_selected
     )
 {
     bool selected = false;
     
     sha256 hash_best = 0;
     
-    index_selected = std::shared_ptr<block_index> ();
+    *index_selected = 0;
     
     for (auto & item : sorted_by_timestamp)
     {
@@ -453,7 +489,7 @@ bool kernel::select_block_from_candidates(
         {
             hash_best = hash_selection;
             
-            index_selected = index;
+            *index_selected = reinterpret_cast<const block_index *> (index);
         }
         else if (selected == false)
         {
@@ -461,8 +497,19 @@ bool kernel::select_block_from_candidates(
             
             hash_best = hash_selection;
             
-            index_selected = index;
+            *index_selected = reinterpret_cast<const block_index *> (index);
         }
+    }
+    
+    /**
+     * -printstakemodifier
+     */
+    if (globals::instance().debug())
+    {
+        log_none(
+            "Kernel, select block from candidates, selection hash = " <<
+            hash_best.to_string() << "."
+        );
     }
     
     return selected;
@@ -502,16 +549,26 @@ bool kernel::check_proof_of_stake(
         tx_index) == false
         )
     {
-        log_debug(
-            "Kernel, check proof of stake failed, read tx previous failed."
-        );
-        
-        /**
-         * Set the Denial-of-Service score for the connection.
-         */
-        if (connection)
+        if (utility::is_initial_block_download() == true)
         {
-            connection->set_dos_score(connection->dos_score() + 1);
+            log_debug(
+                "Kernel, check proof of stake failed, read tx previous failed "
+                "(normal during initial download)."
+            );
+        }
+        else
+        {
+            log_error(
+                "Kernel, check proof of stake failed, read tx previous failed."
+            );
+            
+            /**
+             * Set the Denial-of-Service score for the connection.
+             */
+            if (connection)
+            {
+                connection->set_dos_score(connection->dos_score() + 1);
+            }
         }
         
         /**
@@ -524,24 +581,34 @@ bool kernel::check_proof_of_stake(
     tx_db.close();
 
     /**
-     * Verify the signature.
+     * Skip ECDSA signature verification when checking blocks before the last
+     * blockchain checkpoint.
      */
-    if (script::verify_signature(tx_previous, tx, 0, true, 0) == false)
+    if (
+        globals::instance().best_block_height() >=
+        checkpoints::instance().get_total_blocks_estimate()
+        )
     {
-        log_error(
-            "Kernel, check proof of stake failed, verify_signature"
-            " failed on coinstake " << tx.get_hash().to_string() << "."
-        );
-        
         /**
-         * Set the Denial-of-Service score for the connection.
+         * Verify the signature.
          */
-        if (connection)
+        if (script::verify_signature(tx_previous, tx, 0, true, 0) == false)
         {
-            connection->set_dos_score(100);
+            log_error(
+                "Kernel, check proof of stake failed, verify_signature"
+                " failed on coinstake " << tx.get_hash().to_string() << "."
+            );
+            
+            /**
+             * Set the Denial-of-Service score for the connection.
+             */
+            if (connection)
+            {
+                connection->set_dos_score(100);
+            }
+            
+            return false;
         }
-        
-        return false;
     }
     
     /**
@@ -562,7 +629,7 @@ bool kernel::check_proof_of_stake(
         return false;
     }
     
-    bool print_pos = false;
+    auto print_pos = false;
     
     if (
         check_stake_kernel_hash(bits, blk,
@@ -571,18 +638,29 @@ bool kernel::check_proof_of_stake(
         tx_in.previous_out(), tx.time(), hash_pos, print_pos) == false
         )
     {
-        log_debug(
-            "Kernel, check proof of stake failed, check kernel failed on "
-            "coinstake " << tx.get_hash().to_string() << ", hash_pos = " <<
-            hash_pos.to_string() << "."
-        );
-        
-        /**
-         * Set the Denial-of-Service score for the connection.
-         */
-        if (connection)
+        if (utility::is_initial_block_download() == true)
         {
-            connection->set_dos_score(connection->dos_score() + 1);
+            log_debug(
+                "Kernel, check proof of stake failed, check kernel failed on "
+                "coinstake " << tx.get_hash().to_string() << ", hash_pos = " <<
+                hash_pos.to_string() << " (normal during initial download)."
+            );
+        }
+        else
+        {
+            log_debug(
+                "Kernel, check proof of stake failed, check kernel failed on "
+                "coinstake " << tx.get_hash().to_string() << ", hash_pos = " <<
+                hash_pos.to_string() << "."
+            );
+            
+            /**
+             * Set the Denial-of-Service score for the connection.
+             */
+            if (connection)
+            {
+                connection->set_dos_score(connection->dos_score() + 1);
+            }
         }
         
         /**
@@ -723,7 +801,7 @@ bool kernel::get_kernel_stake_modifier(
     }
     
     const auto * index_from =
-        globals::instance().block_indexes()[hash_block_from].get()
+        globals::instance().block_indexes()[hash_block_from]
     ;
     
     stake_modifier_height = index_from->height();
@@ -771,7 +849,7 @@ bool kernel::get_kernel_stake_modifier(
 			}
         }
         
-        index = index->block_index_next().get();
+        index = index->block_index_next();
         
         if (index->generated_stake_modifier())
         {

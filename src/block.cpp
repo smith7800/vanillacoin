@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -36,6 +36,7 @@
 #include <coin/filesystem.hpp>
 #include <coin/globals.hpp>
 #include <coin/hash.hpp>
+#include <coin/incentive.hpp>
 #include <coin/kernel.hpp>
 #include <coin/key_reserved.hpp>
 #include <coin/key_store.hpp>
@@ -43,15 +44,18 @@
 #include <coin/message.hpp>
 #include <coin/point_out.hpp>
 #include <coin/reward.hpp>
+#include <coin/script_checker_queue.hpp>
 #include <coin/stack_impl.hpp>
 #include <coin/tcp_connection.hpp>
 #include <coin/tcp_connection_manager.hpp>
+#include <coin/tcp_transport.hpp>
 #include <coin/time.hpp>
 #include <coin/transaction_in.hpp>
 #include <coin/transaction_out.hpp>
 #include <coin/transaction_pool.hpp>
 #include <coin/utility.hpp>
 #include <coin/wallet_manager.hpp>
+#include <coin/zerotime.hpp>
 
 using namespace coin;
 
@@ -118,6 +122,12 @@ bool block::decode(data_buffer & buffer, const bool & block_header_only)
     m_header.bits = buffer.read_uint32();
     m_header.nonce = buffer.read_uint32();
     
+    log_none(
+        "version = " << m_header.version << ", timestamp = " <<
+        m_header.timestamp << ", bits = " << m_header.bits <<
+        ", nonce = " << m_header.nonce
+    );
+    
     if (block_header_only)
     {
         // ...
@@ -155,17 +165,20 @@ bool block::decode(data_buffer & buffer, const bool & block_header_only)
          */
         auto len = buffer.read_var_int();
         
-        /**
-         * Read the signature.
-         */
-        auto bytes = buffer.read_bytes(len);
-        
-        /**
-         * Insert the signature.
-         */
-        m_signature.insert(
-            m_signature.begin(), bytes.begin(), bytes.end()
-        );
+        if (len > 0)
+        {
+            /**
+             * Read the signature.
+             */
+            auto bytes = buffer.read_bytes(len);
+            
+            /**
+             * Insert the signature.
+             */
+            m_signature.insert(
+                m_signature.begin(), bytes.begin(), bytes.end()
+            );
+        }
     }
     
     return true;
@@ -206,11 +219,27 @@ sha256 block::get_hash() const
 
     assert(buffer.size() == header_length);
 
-    auto digest = hash::whirlpoolx(
-        reinterpret_cast<std::uint8_t *>(buffer.data()), buffer.size()
-    );
+    /**
+     * Use whirlpool for blocks less than version 5.
+     */
+    auto use_whirlpool = m_header.version < 5;
     
-    std::memcpy(ptr, &digest[0], digest.size());
+    if (use_whirlpool == true)
+    {
+        auto digest = hash::whirlpoolx(
+            reinterpret_cast<std::uint8_t *>(buffer.data()), buffer.size()
+        );
+        
+        std::memcpy(ptr, &digest[0], digest.size());
+    }
+    else
+    {
+        auto digest = hash::blake2568round(
+            reinterpret_cast<std::uint8_t *>(buffer.data()), buffer.size()
+        );
+        
+        std::memcpy(ptr, &digest[0], digest.size());
+    }
 
     return ret;
 }
@@ -227,7 +256,7 @@ sha256 block::get_hash_genesis()
 sha256 block::get_hash_genesis_test_net()
 {
     static const sha256 ret(
-        ""
+        "de32fadf1f12e666f783c529e7764d49950541d6571a6080a9242cd7dc595c65"
     );
 
     return ret;
@@ -248,12 +277,173 @@ std::vector<transaction> & block::transactions()
     return m_transactions;
 }
 
+std::vector<std::uint8_t> & block::signature()
+{
+    return m_signature;
+}
+
 void block::update_time(block_index & previous)
 {
     m_header.timestamp = std::max(
         m_header.timestamp,
         static_cast<std::uint32_t> (time::instance().get_adjusted())
     );
+}
+
+block block::create_genesis()
+{
+    /**
+     * Genesis block creation.
+     */
+    std::string timestamp_quote =
+        "December 22, 2014 - New York Times calls for Cheney, "
+        "Bush officials to be investigated and prosecuted for "
+        "torture."
+    ;
+    
+    /**
+     * Allocate a new transaction.
+     */
+    transaction tx_new;
+    
+    /**
+     * Set the transaction time to the time of the start of the
+     * chain.
+     */
+    tx_new.set_time(constants::chain_start_time);
+    
+    /**
+     * Allocate one input.
+     */
+    tx_new.transactions_in().resize(1);
+    
+    /**
+     * Allocate one output.
+     */
+    tx_new.transactions_out().resize(1);
+
+    /**
+     * Create the script signature.
+     */
+    auto script_signature =
+        script() << 486604799 << big_number(9999) <<
+        std::vector<std::uint8_t>(
+        (const std::uint8_t *)timestamp_quote.c_str(),
+        (const std::uint8_t *)timestamp_quote.c_str() +
+        timestamp_quote.size()
+    );
+
+    /**
+     * Set the script signature on the input.
+     */
+    tx_new.transactions_in()[0].set_script_signature(
+        script_signature
+    );
+    
+    /**
+     * Set the output to empty.
+     */
+    tx_new.transactions_out()[0].set_empty();
+
+    /**
+     * Allocate the genesis block.
+     */
+    block blk;
+    
+    /**
+     * Add the transactions.
+     */
+    blk.transactions().push_back(tx_new);
+    
+    /**
+     * There is no previous block.
+     */
+    blk.header().hash_previous_block = 0;
+    
+    /**
+     * Build the merkle tree.
+     */
+    blk.header().hash_merkle_root = blk.build_merkle_tree();
+    
+    /**
+     * Set the header version.
+     */
+    blk.header().version = 1;
+    
+    /**
+     * Set the header timestamp.
+     */
+    blk.header().timestamp = constants::chain_start_time;
+    
+    /**
+     * Set the header bits.
+     */
+    blk.header().bits =
+        constants::proof_of_work_limit.get_compact()
+    ;
+    
+    assert(blk.header().bits == 504365055);
+    
+    /**
+     * The test network uses a different genesis block by using a
+     * different nonce.
+     */
+    if (constants::test_net == true)
+    {
+        /**
+         * Set the header nonce.
+         */
+        blk.header().nonce =
+            constants::chain_start_time - 10000 + 1
+        ;
+    }
+    else
+    {
+        /**
+         * Set the header nonce.
+         */
+        blk.header().nonce = constants::chain_start_time - 10000;
+    }
+
+    /**
+     * Print the block.
+     */
+    blk.print();
+
+    log_debug(
+        "Block hash = " << blk.get_hash().to_string() << "."
+    );
+    log_debug(
+        "Block header hash merkle root = " <<
+        blk.header().hash_merkle_root.to_string() << "."
+    );
+    log_debug(
+        "Block header time = " << blk.header().timestamp << "."
+    );
+    log_debug(
+        "Block header nonce = " << blk.header().nonce << "."
+    );
+
+    /**
+     * Check the merkle root hash.
+     */
+    assert(
+        blk.header().hash_merkle_root ==
+        sha256("e6dc22fdcfcbffccb14cacfab0f0af67721d38f2929d8344cb"
+        "1635ac400e2e68")
+        
+    );
+    
+    /**
+     * Check the genesis block hash.
+     */
+    assert(
+        blk.get_hash() ==
+        (constants::test_net ? block::get_hash_genesis_test_net() :
+        block::get_hash_genesis())
+    );
+    
+    return blk;
 }
 
 std::shared_ptr<block> block::create_new(
@@ -287,40 +477,105 @@ std::shared_ptr<block> block::create_new(
     ;
     
     /**
+     * Create incentive transaction.
+     */
+    if (
+        proof_of_stake == false &&
+        globals::instance().is_incentive_enabled() == true
+        )
+    {
+        auto index_previous = stack_impl::get_block_index_best();
+
+        if (
+            index_previous &&
+            incentive::instance().get_key().is_null() == false
+            )
+        {
+            if (
+                incentive::instance().winners().count(
+                index_previous->height() + 1) > 0
+                )
+            {
+                tx_new.transactions_out().resize(2);
+
+                script script_incentive;
+
+                auto wallet_address =
+                    incentive::instance().winners()[
+                    index_previous->height() + 1].second
+                ;
+                
+                address addr;
+                
+                if (addr.set_string(wallet_address) == true)
+                {
+                    script_incentive.set_destination(addr.get());
+                    
+                    tx_new.transactions_out()[1].script_public_key() =
+                        script_incentive
+                    ;
+
+                    tx_new.transactions_out()[1].set_value(0);
+
+                    destination::tx_t dest;
+                    
+                    if (
+                        script::extract_destination(
+                        script_incentive, dest) == true
+                        )
+                    {
+                        address addr(dest);
+                    
+                        log_info(
+                            "Block creating new incentive transaction for " <<
+                            addr.to_string().substr(0, 8)<< "."
+                        );
+                    }
+                }
+            }
+        }
+    }
+    
+    /**
      * Add our (coinbase) transaction as the first transaction.
      */
     ret->transactions().push_back(tx_new);
 
     /**
      * Calculate the largest block we're willing to create.
+     * -blockmaxsize
     */
-    auto max_size = constants::max_block_size_gen / 2;
+    auto max_size = block::get_maximum_size_median220() / 4;
     
     /**
-     * Limit to betweeen 1000 and max_block_size - 1000 for sanity.
+     * Limit to betweeen 1000 and block::get_maximum_size_median220()
+     * - 1000 for sanity.
      */
     max_size = std::max(
-        1000, std::min((constants::max_block_size - 1000), max_size)
+        static_cast<std::size_t> (1000),
+        std::min((block::get_maximum_size_median220() - 1000), max_size)
     );
 
     /**
      * How much of the block should be dedicated to high-priority transactions,
      * included regardless of the fees they pay.
+     * -blockprioritysize
      */
     auto priority_size = 27000;
     
-    priority_size = std::min(max_size, priority_size);
+    priority_size = std::min(max_size, static_cast<std::size_t> (priority_size));
 
     /**
-     * Minimum block size you want to create; block will be filled with free transactions
-     * until there are no more or the block reaches this size:
+     * Minimum block size you want to create; block will be filled with free
+     * transactions until there are no more or the block reaches this size:
+     * -blockminsize
      */
     auto min_size = 0;
     
-    min_size = std::min(max_size, min_size);
+    min_size = std::min(max_size, static_cast<std::size_t> (min_size));
     
     /**
-     * min_tx_fee
+     * -mintxfee
      */
     std::int64_t min_transaction_fee = constants::min_tx_fee;
 
@@ -445,7 +700,18 @@ std::shared_ptr<block> block::create_new(
                         "Block, create new, transaction pool item is "
                         "missing input."
                     );
-
+#if (!defined _MSC_VER)
+#warning :TODO: https://github.com/bitcoin/bitcoin/pull/5267
+#endif
+#if 0
+                    /**
+                     * :JC: When issue 5267 is fixed uncomment this.
+                     */
+                    if (globals::instance().debug())
+                    {
+                        assert("transaction is missing input" == 0);
+                    }
+#endif
                     is_missing_inputs = true;
                     
                     if (ptr_orphan)
@@ -559,16 +825,16 @@ std::shared_ptr<block> block::create_new(
         
         tx.encode(buffer);
         
-        auto tx_size = tx.size();
+        auto tx_size = buffer.size();
 
-        if (block_size + tx_size >= constants::max_block_size)
+        if (block_size + tx_size >= block::get_maximum_size_median220())
         {
             continue;
         }
         
         auto sig_ops = tx.get_legacy_sig_op_count();
         
-        if (block_sig_ops + sig_ops >= constants::max_block_sig_ops)
+        if (block_sig_ops + sig_ops >= block::get_maximum_size_median220() / 50)
         {
             continue;
         }
@@ -636,7 +902,7 @@ std::shared_ptr<block> block::create_new(
         
         sig_ops += tx.get_p2sh_sig_op_count(inputs);
 
-        if (block_sig_ops + sig_ops >= constants::max_block_sig_ops)
+        if (block_sig_ops + sig_ops >= block::get_maximum_size_median220() / 50)
         {
             continue;
         }
@@ -665,6 +931,18 @@ std::shared_ptr<block> block::create_new(
         block_sig_ops += sig_ops;
         
         fees += transaction_fees;
+
+        /**
+         * -printpriority;
+         */
+        if (globals::instance().debug() && false)
+        {
+            log_debug(
+                "Block, create new, priority = " << priority <<
+                ", fee_per_kilobyte = " << fee_per_kilobyte <<
+                ", hash(tx id) = " << tx.get_hash().to_string() << "."
+            );
+        }
 
         /**
          * Add the transactions that depend on this one to the priority queue.
@@ -706,13 +984,53 @@ std::shared_ptr<block> block::create_new(
      * Set the last block size.
      */
     globals::instance().set_last_block_size(block_size);
-    
-    if (ret->is_proof_of_work())
+
+    /**
+     * -printpriority
+     */
+    if (globals::instance().debug())
     {
-        ret->transactions()[0].transactions_out()[0].set_value(
-            reward::get_proof_of_work(index_previous->height() + 1, fees,
-            index_previous->get_block_hash())
-        );
+        log_debug("Block, create new total size = " << block_size << ".");
+    }
+    
+    if (ret->is_proof_of_work() == true)
+    {
+        if (
+            globals::instance().is_incentive_enabled() == true &&
+            incentive::instance().get_key().is_null() == false &&
+            incentive::instance().winners().count(
+            index_previous->height() + 1) > 0
+            )
+        {
+            auto value = reward::get_proof_of_work(
+                index_previous->height() + 1, fees,
+                index_previous->get_block_hash()
+            );
+            
+            auto value_incentive =
+                static_cast<std::uint64_t> (value * (
+                incentive::instance().get_percentage(
+                index_previous->height() + 1) / 100.0f))
+            ;
+
+            ret->transactions()[0].transactions_out()[0].set_value(
+                value - value_incentive
+            );
+            
+            if (tx_new.transactions_out().size() > 1)
+            {
+                ret->transactions()[0].transactions_out()[1].set_value(
+                    value_incentive
+                );
+            }
+        }
+        else
+        {
+            ret->transactions()[0].transactions_out()[0].set_value(
+                reward::get_proof_of_work(index_previous->height() + 1, fees,
+                index_previous->get_block_hash())
+            );
+        }
     }
     
     /**
@@ -720,7 +1038,7 @@ std::shared_ptr<block> block::create_new(
      */
     ret->header().hash_previous_block = index_previous->get_block_hash();
     
-    if (ret->is_proof_of_stake())
+    if (ret->is_proof_of_stake() == true)
     {
         ret->header().timestamp = ret->transactions()[1].time();
     }
@@ -746,9 +1064,7 @@ std::shared_ptr<block> block::create_new(
     return ret;
 }
 
-bool block::disconnect_block(
-    db_tx & tx_db, const std::shared_ptr<block_index> & index
-    )
+bool block::disconnect_block(db_tx & tx_db, block_index * index)
 {
     /**
      * Disconnect in reverse order.
@@ -797,15 +1113,21 @@ bool block::disconnect_block(
 }
 
 bool block::connect_block(
-    db_tx & tx_db, const std::shared_ptr<block_index> & pindex,
-    const bool  & check_only
+    db_tx & tx_db, block_index * pindex, const bool  & check_only
     )
 {
+    if (globals::instance().state() != globals::state_started)
+    {
+        log_error("Block, not connecting because state != state_started.");
+    
+        return false;
+    }
+    
     try
     {
         /**
          * Check it again in case a previous version let a bad block in.
-         * jc: Is this check_only needed?
+         * jc: Is this crap needed anymore?
          */
         if (check_block(0, check_only == false, check_only == false) == false)
         {
@@ -849,6 +1171,11 @@ bool block::connect_block(
     }
 
     std::map<sha256, transaction_index> queued_changes;
+  
+    /**
+     * Allocate the script_checker_queue:context.
+     */
+    script_checker_queue::context script_checker_queue_context;
     
     std::int64_t fees = 0;
     std::int64_t value_in = 0;
@@ -878,7 +1205,7 @@ bool block::connect_block(
         
         sig_ops += i.get_legacy_sig_op_count();
         
-        if (sig_ops > constants::max_block_sig_ops)
+        if (sig_ops > block::get_maximum_size_median220() / 50)
         {
             log_error("Block connect block failed, too many sigops.");
             
@@ -925,7 +1252,7 @@ bool block::connect_block(
                  */
                 sig_ops += i.get_p2sh_sig_op_count(inputs);
                 
-                if (sig_ops > constants::max_block_sig_ops)
+                if (sig_ops > block::get_maximum_size_median220() / 50)
                 {
                     log_error("Block connect failed, too many sig ops.");
                     
@@ -944,20 +1271,44 @@ bool block::connect_block(
                 fees += tx_value_in - tx_value_out;
             }
             
+            /**
+             * Allocate container to hold all scripts to be verified by the
+             * script_checker_queue.
+             */
+            std::vector<script_checker> script_checker_checks;
+
             if (
                 i.connect_inputs(tx_db, inputs, queued_changes,
                 tx_position_this, pindex, true, false,
-                strict_pay_to_script_hash) == false
+                strict_pay_to_script_hash, true,
+                &script_checker_checks) == false
                 )
             {
                 return false;
             }
+            
+            /**
+             * Insert the scripts to be check by the script_checker_queue.
+             */
+            script_checker_queue_context.insert(script_checker_checks);
         }
 
         queued_changes[hash_tx] = transaction_index(
             tx_position_this,
             static_cast<std::uint32_t> (i.transactions_out().size())
         );
+    }
+    
+    /**
+     * Wait for all scripts to be checked by the script_checker_queue.
+     */
+    if (script_checker_queue_context.sync_wait() == false)
+    {
+        log_error(
+            "Block connect failed, one of the scripts failed validation."
+        );
+        
+        return false;
     }
     
     /**
@@ -991,6 +1342,15 @@ bool block::connect_block(
         
         return false;
     }
+    
+    /**
+     * Fees are not collected by miners as in bitcoin instead they are
+     * destroyed to compensate the entire network (ppcoin).
+     * -printcreation
+     */
+    log_none(
+        "Block connect, destroy fees = " << utility::format_money(fees) << "."
+    );
 
     if (check_only)
     {
@@ -1062,6 +1422,10 @@ std::uint32_t block::get_stake_entropy_bit(const std::uint32_t & height) const
      * Take the last bit of the block hash as the entropy bit.
      */
     std::uint32_t entropy_bit = get_hash().to_uint64() & 1llu;
+    
+    log_none(
+        "Block " << height << ", entropy bit = " << entropy_bit << "."
+    );
     
     return entropy_bit;
 }
@@ -1140,11 +1504,32 @@ bool block::check_block(
      */
     
     /**
+     * Clear
+     */
+    clear();
+    
+    /**
+     * Encode
+     */
+    encode();
+    
+    /**
+     * Get the size.
+     */
+    auto length = size();
+    
+    /**
+     * Clear
+     */
+    clear();
+    
+    /**
      * Check size limits.
      */
     if (
-        m_transactions.size() == 0 || m_transactions.size() > size_maximum ||
-        size() > size_maximum
+        m_transactions.size() == 0 ||
+        m_transactions.size() > block::get_maximum_size_median220() ||
+        length > block::get_maximum_size_median220()
         )
     {
         /**
@@ -1158,6 +1543,28 @@ bool block::check_block(
         throw std::runtime_error("size limits failed");
         
         return false;
+    }
+
+    /**
+     * Check that the nonce is in range for the block type.
+     */
+    if (is_proof_of_stake() == true)
+    {
+        if (m_header.nonce != 0)
+        {
+            throw std::runtime_error("invalid nonce for proof of stake");
+            
+            return false;
+        }
+    }
+    else if (is_proof_of_work() == true)
+    {
+        if (m_header.nonce == 0)
+        {
+            throw std::runtime_error("invalid nonce for proof of work");
+            
+            return false;
+        }
     }
 
     /**
@@ -1313,7 +1720,392 @@ bool block::check_block(
             return false;
         }
     }
-    
+
+    /**
+     * ZeroTime transaction checking.
+     */
+    if (globals::instance().is_zerotime_enabled())
+    {
+        if (utility::is_initial_block_download() == false)
+        {
+            for (auto & i : m_transactions)
+            {
+                if (i.is_coin_base() || i.is_coin_stake())
+                {
+                    continue;
+                }
+                else if (zerotime::instance().has_lock_conflict(i))
+                {
+                    /**
+                     * Set the Denial-of-Service score for the connection.
+                     */
+                    if (connection)
+                    {
+                        connection->set_dos_score(connection->dos_score() + 1);
+                    }
+                    
+                    throw std::runtime_error("zerotime lock conflict");
+                    
+                    return false;
+                }
+            }
+        }
+    }
+
+    /**
+     * Incentive block checking.
+     */
+    if (globals::instance().is_incentive_enabled() == true)
+    {
+        if (is_proof_of_work() == true)
+        {
+            if (utility::is_initial_block_download() == false)
+            {
+                if (m_transactions.size() > 0)
+                {
+                    auto index_previous = stack_impl::get_block_index_best();
+                    
+                    /**
+                     * The incentive enforcement block number.
+                     */
+                    enum { incentive_enforcement = 220000 };
+
+                    if (
+                        index_previous &&
+                        index_previous->height() + 1 >= incentive_enforcement
+                        )
+                    {
+                        if (
+                            incentive::instance().winners().count(
+                            index_previous->height() + 1) > 0
+                            )
+                        {
+                            /**
+                             * There must be at least two outputs.
+                             */
+                            if (
+                                m_transactions[0].transactions_out().size() > 1
+                                )
+                            {
+                                /**
+                                 * Get the value.
+                                 */
+                                auto value = reward::get_proof_of_work(
+                                    index_previous->height() + 1, 0,
+                                    index_previous->get_block_hash()
+                                );
+                                
+                                /**
+                                 * Get the incentive value.
+                                 */
+                                std::int64_t value_incentive =
+                                    value * (incentive::instance(
+                                    ).get_percentage(
+                                    index_previous->height() + 1) / 100.0f
+                                );
+
+                                /**
+                                 * Get their incentive value.
+                                 */
+                                auto their_incentive_value =
+                                    m_transactions[0].transactions_out()[
+                                    1].value()
+                                ;
+
+                                if (their_incentive_value >= value_incentive)
+                                {
+                                    log_info(
+                                        "Block got incentive reward "
+                                        "(VALID VALUE)."
+                                    );
+                                    
+                                    /**
+                                     * Get the winner for this height.
+                                     */
+                                    auto winner =
+                                        incentive::instance().winners()[
+                                        index_previous->height() + 1
+                                    ].second;
+                                    
+                                    if (winner.size() > 0)
+                                    {
+                                       /**
+                                        * Check winners against address.
+                                        */
+                                        auto script_public_key =
+                                            m_transactions[0
+                                            ].transactions_out()[
+                                            1].script_public_key()
+                                        ;
+                                        
+                                        destination::tx_t dest_tx;
+
+                                        if (
+                                            script::extract_destination(
+                                            script_public_key, dest_tx) == true
+                                            )
+                                        {
+                                            auto addr = address(
+                                                dest_tx).to_string()
+                                            ;
+     
+                                            if (winner == addr)
+                                            {
+                                                log_info(
+                                                    "Block got incentive reward"
+                                                    " (VALID WINNER) " <<
+                                                    winner << ":" << addr << "."
+                                                );
+                                            }
+                                            else
+                                            {
+                                                if (
+                                                    incentive::instance(
+                                                    ).runners_up().count(
+                                                    index_previous->height() + 1
+                                                    ) > 0
+                                                    )
+                                                {
+                                                    /**
+                                                     * Get the runners up.
+                                                     */
+                                                    auto runners_up =
+                                                        incentive::instance(
+                                                        ).runners_up()[
+                                                        index_previous->height()
+                                                        + 1]
+                                                    ;
+                                                    
+                                                    if (runners_up.size() > 0)
+                                                    {
+                                                        auto found = false;
+                                                        
+                                                        for (
+                                                            auto & i :
+                                                            runners_up
+                                                            )
+                                                        {
+                                                            if (i == addr)
+                                                            {
+                                                                log_info(
+                                                                    "Block got "
+                                                                    "incentive "
+                                                                    "reward "
+                                                                    "(VALID "
+                                                                    "RUNNERSUP) "
+                                                                    << i << ":"
+                                                                    << addr <<
+                                                                    "."
+                                                                );
+                                                                
+                                                                found = true;
+                                                                
+                                                                break;
+                                                            }
+                                                        }
+                                                        
+                                                        /**
+                                                         * If we have no
+                                                         * matching winner
+                                                         * and no runners up we
+                                                         * we will accept the
+                                                         * questionable reward
+                                                         * but increase the
+                                                         * node's ban score.
+                                                         */
+                                                        if (found == false)
+                                                        {
+                                                            log_error(
+                                                                "Block got "
+                                                                "incentive "
+                                                                "reward "
+                                                                "(QUESTIONABLE "
+                                                                "WINNER/"
+                                                                "NORUNNERSUP) "
+                                                                << winner << ":"
+                                                                << addr << "."
+                                                            );
+
+                                                            /**
+                                                             * Increment the
+                                                             * Denial-of-Service
+                                                             * score for the
+                                                             * connection.
+                                                             */
+                                                            if (connection)
+                                                            {
+                                                                connection->set_dos_score(
+                                                                    connection->dos_score(
+                                                                    ) + 1
+                                                                );
+                                                            }
+                                                            
+                                                            /**
+                                                             * We accept the
+                                                             * block as valid
+                                                             * since we lack
+                                                             * consensus.
+                                                             */
+                                                        }
+                                                    }
+                                                    else
+                                                    {
+                                                        /**
+                                                         * We have no winner or
+                                                         * runners up, therefore
+                                                         * are a new node to the
+                                                         * system, follow the
+                                                         * longest chain.
+                                                         */
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        else
+                                        {
+                                            /**
+                                             * Increment the Denial-of-Service
+                                             * score for the connection.
+                                             */
+                                            if (connection)
+                                            {
+                                                connection->set_dos_score(
+                                                    connection->dos_score()
+                                                    + 5
+                                                );
+                                            }
+                                            
+                                            /**
+                                             * We failed to extract the
+                                             * destination address found in the
+                                             * block, reject and increase the
+                                             * peers ban score.
+                                             */
+                                            return false;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        /**
+                                         * We have no winners, follow the
+                                         * longest chain.
+                                         */
+                                        log_info(
+                                            "Block got incentive reward "
+                                            "(LONGESTCHAIN)."
+                                        );
+                                    }
+                                }
+                                else
+                                {
+                                    log_info(
+                                        "Got incentive reward(RAPED) NOT "
+                                        "ENOUGH." << static_cast<double> (
+                                        m_transactions[0].transactions_out()[
+                                        0].value()) / constants::coin << ":" <<
+                                        static_cast<double> (value) /
+                                        constants::coin
+                                    );
+                                    
+                                    /**
+                                     * Set the Denial-of-Service score for the
+                                     * connection.
+                                     */
+                                    if (connection)
+                                    {
+                                        connection->set_dos_score(
+                                            connection->dos_score() + 1
+                                        );
+                                    }
+                                    
+                                    /**
+                                     * There was not enough incentive value
+                                     * found in the block, reject and increase
+                                     * the peers ban score.
+                                     */
+                                    return false;
+                                }
+                            }
+                            else
+                            {
+                                if (connection)
+                                {
+                                    try
+                                    {
+                                        if (
+                                            auto t =
+                                            connection->get_tcp_transport(
+                                            ).lock()
+                                            )
+                                        {
+                                            log_info(
+                                                "Got incentive reward(RAPED) "
+                                                "EMPTY from " << t->socket(
+                                                ).remote_endpoint() << "."
+                                            );
+                                        }
+                                    }
+                                    catch (std::exception & e)
+                                    {
+                                        log_info(
+                                            "Got incentive reward(RAPED) EMPTY "
+                                            "what = " << e.what() << "."
+                                        );
+                                    }
+                                }
+                                else
+                                {
+                                    log_info(
+                                        "Got incentive reward(RAPED) EMPTY "
+                                        "from ???."
+                                    );
+                                }
+                                
+                                /**
+                                 * We have winners but got a block with an
+                                 * empty reward, clear the winner and reject
+                                 * the block.
+                                 */
+                                incentive::instance().winners().erase(
+                                    index_previous->height() + 1
+                                );
+                                
+                                /**
+                                 * Set the Denial-of-Service score for the
+                                 * connection.
+                                 */
+                                if (connection)
+                                {
+                                    connection->set_dos_score(
+                                        connection->dos_score() + 1
+                                    );
+                                }
+
+                                /**
+                                 * There was no incentive transaction found in
+                                 * the block, reject it.
+                                 */
+                                return false;
+                            }
+                        }
+                        else
+                        {
+                            /**
+                             * Follow the longest chain.
+                             */
+                        }
+                    }
+                    else
+                    {
+                        /**
+                         * Follow the longest chain.
+                         */
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * Check the transactions.
      */
@@ -1385,7 +2177,7 @@ bool block::check_block(
         sig_ops += i.get_legacy_sig_op_count();
     }
     
-    if (sig_ops > constants::max_block_sig_ops)
+    if (sig_ops > block::get_maximum_size_median220() / 50)
     {
         /**
          * Set the Denial-of-Service score for the connection.
@@ -1425,28 +2217,38 @@ bool block::check_block(
     }
 
     /**
-     * Check the signature.
+     * Skip ECDSA signature verification when checking blocks before the last
+     * blockchain checkpoint.
      */
-    if (check_signature() == false)
+    if (
+        globals::instance().best_block_height() >=
+        checkpoints::instance().get_total_blocks_estimate()
+        )
     {
         /**
-         * Set the Denial-of-Service score for the connection.
+         * Check the signature.
          */
-        if (connection)
+        if (check_signature() == false)
         {
-            connection->set_dos_score(100);
+            /**
+             * Set the Denial-of-Service score for the connection.
+             */
+            if (connection)
+            {
+                connection->set_dos_score(100);
+            }
+            
+            throw std::runtime_error("bad block signature");
+            
+            return false;
         }
-        
-        throw std::runtime_error("bad block signature");
-        
-        return false;
     }
 
     return true;
 }
 
 bool block::read_from_disk(
-    const std::shared_ptr<block_index> & index, const bool & read_transactions
+    const block_index * index, const bool & read_transactions
     )
 {
     if (read_transactions == false)
@@ -1478,6 +2280,20 @@ bool block::accept_block(
     const std::shared_ptr<tcp_connection_manager> & connection_manager
     )
 {
+    if (globals::instance().state() != globals::state_started)
+    {
+        log_debug("Block, not accepting because state != state_started.");
+    
+        return false;
+    }
+    
+    if (globals::instance().is_client_spv() == true)
+    {
+        log_debug("Block, not accepting because we are an SPV client.");
+        
+        return false;
+    }
+    
     auto hash_block = get_hash();
  
     /**
@@ -1519,6 +2335,60 @@ bool block::accept_block(
     auto height = index_previous->height() + 1;
     
     log_debug("Block, accept block, height = " << height << ".");
+    
+    /**
+     * Pause Proof-of-Work for mobile Proof-of-Stake testing and development
+     * of FPGA mining support.
+     */
+    
+    /**
+     * The block height at which to pause Proof-of-Work.
+     */
+    enum { block_height_pause_pow = 117833 };
+    
+    /**
+     * The block height at which to resume Proof-of-Work.
+     */
+    enum { block_height_resume_pow = 136000 };
+    
+    /**
+     * The block height at which to pause even Proof-of-Work blocks.
+     */
+    enum { block_height_pause_even_pow = 136400 };
+    
+	if (
+        is_proof_of_work() &&
+        (height > block_height_pause_pow && height < block_height_resume_pow)
+        )
+    {
+        log_error(
+            "Block, accept block failed, PoW is paused until block # " <<
+            block_height_resume_pow << ", height = " <<  height << "."
+        );
+        
+        return false;
+    }
+
+    if (
+        is_proof_of_work() && (height >= block_height_resume_pow &&
+        height < block_height_pause_even_pow)
+        )
+    {
+        /**
+         * When Proof-of-Work is mixed with Proof-of-Stake we see ~22% increase
+         * in block generation as a result of variable timing. By only
+         * accepting even Proof-of-Work blocks "back to back" block generation
+         * will no longer occur from the same entity and the time variation
+         * will be removed. This has the side-effect that it halts an
+         * insta-mine attack attempt immediately.
+         */
+        if (height % 2 == 1)
+        {
+            log_debug("Block, accept block failed, height is not even.");
+            
+            return false;
+        }
+    }
     
 	if (is_proof_of_work() && height > constants::pow_cutoff_block)
     {
@@ -1597,6 +2467,9 @@ bool block::accept_block(
      */
     if (checkpoints::instance().check_sync(hash_block, index_previous) == false)
     {
+        /**
+         * -nosynccheckpoints
+         */
         auto nosynccheckpoints = false;
         
         if (nosynccheckpoints == false)
@@ -1633,7 +2506,23 @@ bool block::accept_block(
     
         return false;
     }
-   
+    
+    /**
+     * Reject block header version < 5 after block 310000.
+     */
+    if (
+        m_header.version < 5 &&
+        ((constants::test_net == false && height > 310000) ||
+        (constants::test_net == true && height > 18))
+        )
+    {
+        log_error(
+            "Block, accept block failed, rejected block header version < 5."
+        );
+    
+        return false;
+    }
+
     /**
      * Enforce rule that the coinbase starts with serialized block height.
      */
@@ -1711,19 +2600,28 @@ bool block::accept_block(
     }
 
     /**
-     * Relay inventory.
+     * Do not relay during initial download.
      */
-    if (globals::instance().hash_best_chain() == hash_block)
+    if (utility::is_initial_block_download() == false)
     {
-        auto connections = connection_manager->tcp_connections();
-        
-        for (auto & i : connections)
+        /**
+         * Relay inventory.
+         */
+        if (globals::instance().hash_best_chain() == hash_block)
         {
-            if (auto connection = i.second.lock())
+            if (connection_manager)
             {
-                connection->send_inv_message(
-                    inventory_vector::type_msg_block, hash_block
-                );
+                auto connections = connection_manager->tcp_connections();
+                
+                for (auto & i : connections)
+                {
+                    if (auto connection = i.second.lock())
+                    {
+                        connection->send_inv_message(
+                            inventory_vector::type_msg_block, hash_block
+                        );
+                    }
+                }
             }
         }
     }
@@ -1747,7 +2645,7 @@ bool block::read_from_disk(
     
     if (f)
     {
-        bool block_header_only = false;
+        auto block_header_only = false;
         
         if (read_transactions == false)
         {
@@ -1770,16 +2668,26 @@ bool block::read_from_disk(
         if (decode(block_header_only))
         {
             /**
+             * Clear the buffer.
+             */
+            clear();
+        
+            /**
+             * Close the file.
+             */
+            f->close();
+            
+            /**
              * Set the file to null.
              */
-            set_file(0);
+            set_file(nullptr);
         }
         else
         {
             /**
              * Set the file to null.
              */
-            set_file(0);
+            set_file(nullptr);
         
             return false;
         }
@@ -1805,7 +2713,7 @@ bool block::read_from_disk(
     }
     else
     {
-        throw std::runtime_error("failed to open block file");
+        log_error("Block failed to open block file.");
         
         return false;
     }
@@ -1817,6 +2725,17 @@ bool block::write_to_disk(
     std::uint32_t & file_number, std::uint32_t & block_position
     )
 {
+    /**
+     * :TODO: Do not allow empty pruned block files to be created.
+     */
+
+    if (globals::instance().state() != globals::state_started)
+    {
+        log_error("Block, not writing to disk because state != state_started.");
+    
+        return false;
+    }
+     
     /**
      * Open history file to append.
      */
@@ -1912,9 +2831,7 @@ bool block::write_to_disk(
     return true;
 }
 
-bool block::set_best_chain(
-    db_tx & tx_db, std::shared_ptr<block_index> & index_new
-    )
+bool block::set_best_chain(db_tx & tx_db, block_index * index_new)
 {
     auto block_hash = get_hash();
 
@@ -1940,7 +2857,7 @@ bool block::set_best_chain(
             return false;
         }
         
-        stack_impl::get_block_index_genesis() = index_new;
+        stack_impl::set_block_index_genesis(index_new);
     }
     else if (
         m_header.hash_previous_block == globals::instance().hash_best_chain()
@@ -1964,7 +2881,7 @@ bool block::set_best_chain(
         /**
          * List of blocks that need to be connected afterwards.
          */
-        std::vector< std::shared_ptr<block_index> > index_secondary;
+        std::vector<block_index *> index_secondary;
 
         /**
          * Reorganization is costly in terms of database load because it works
@@ -2059,7 +2976,7 @@ bool block::set_best_chain(
      * New best block.
      */
     globals::instance().set_hash_best_chain(block_hash);
-    stack_impl::get_block_index_best() = index_new;
+    stack_impl::set_block_index_best(index_new);
     globals::instance().set_block_index_fbbh_last(0);
     globals::instance().set_best_block_height(
         stack_impl::get_block_index_best()->height()
@@ -2069,17 +2986,41 @@ bool block::set_best_chain(
     globals::instance().set_transactions_updated(
         globals::instance().transactions_updated() + 1
     );
+    
+    log_debug(
+        "Block, set best chain, new best = " <<
+        globals::instance().hash_best_chain().to_string() <<
+        ", height = " << globals::instance().best_block_height() <<
+        ", trust = " << stack_impl::get_best_chain_trust().to_string() <<
+        ", date = " << stack_impl::get_block_index_best()->time() << "."
+    );
+
+    if (globals::instance().best_block_height() % 500 == 0)
+    {
+        log_info(
+            "Block, set best chain, new best = " <<
+            globals::instance().hash_best_chain().to_string() <<
+            ", height = " << globals::instance().best_block_height() <<
+            ", trust = " << stack_impl::get_best_chain_trust().to_string() <<
+            ", date = " << stack_impl::get_block_index_best()->time() << "."
+        );
+    }
+    
+    log_debug(
+        "Block, stake checkpoint = " <<
+        stack_impl::get_block_index_best()->stake_modifier_checksum() << "."
+    );
 
     /**
      * Check the version of the last 100 blocks to see if we need to upgrade.
      */
     if (utility::is_initial_block_download() == false)
     {
-        int blocks_upgraded = 0;
+        auto blocks_upgraded = 0;
         
         auto index = stack_impl::get_block_index_best();
         
-        for (int i = 0; i < 100 && index != 0; i++)
+        for (auto i = 0; i < 100 && index != 0; i++)
         {
             if (index->version() > block::current_version)
             {
@@ -2103,6 +3044,10 @@ bool block::set_best_chain(
         }
     }
 
+    /*
+     * -blocknotify
+     */
+
     return true;
 }
 
@@ -2110,6 +3055,13 @@ bool block::add_to_block_index(
     const std::uint32_t & file_index, const std::uint32_t & block_position
     )
 {
+    if (globals::instance().state() != globals::state_started)
+    {
+        log_error("Block, not adding to index because state != state_started.");
+    
+        return false;
+    }
+    
     /**
      * Check for duplicate.
      */
@@ -2128,9 +3080,7 @@ bool block::add_to_block_index(
     /**
      * Construct new block index.
      */
-    auto index_new = std::make_shared<block_index>(
-        file_index, block_position, *this
-    );
+    auto index_new = new block_index(file_index, block_position, *this);
     
     if (index_new == 0)
     {
@@ -2313,9 +3263,7 @@ bool block::add_to_block_index(
     return true;
 }
 
-bool block::set_best_chain_inner(
-    db_tx & tx_db, const std::shared_ptr<block_index> & index_new
-    )
+bool block::set_best_chain_inner(db_tx & tx_db, block_index * index_new)
 {
     if (
         connect_block(tx_db, index_new) == false ||
@@ -2339,7 +3287,7 @@ bool block::set_best_chain_inner(
     /**
      * Add to current best branch.
      */
-    index_new->block_index_previous()->block_index_next() = index_new;
+    index_new->block_index_previous()->set_block_index_next(index_new);
 
     /**
      * Delete redundant memory transactions.
@@ -2352,7 +3300,7 @@ bool block::set_best_chain_inner(
     return true;
 }
 
-void block::invalid_chain_found(const std::shared_ptr<block_index> & index_new)
+void block::invalid_chain_found(const block_index * index_new)
 {
     if (index_new->chain_trust() > stack_impl::get_best_invalid_trust())
     {
@@ -2361,7 +3309,7 @@ void block::invalid_chain_found(const std::shared_ptr<block_index> & index_new)
         db_tx().write_best_invalid_trust(stack_impl::get_best_invalid_trust());
     }
 
-    log_debug(
+    log_info(
         "Block, invalid chain found, invalid block = " <<
         index_new->get_block_hash().to_string().substr(0, 20) <<
         ", height = " << index_new->height() <<
@@ -2369,7 +3317,7 @@ void block::invalid_chain_found(const std::shared_ptr<block_index> & index_new)
         ", date = " << index_new->time() << "."
     );
 
-    log_debug(
+    log_info(
         "Block, invalid chain found, current block = " <<
         globals::instance().hash_best_chain().to_string().substr(0, 20) <<
         ", height = " << globals::instance().best_block_height() <<
@@ -2569,11 +3517,150 @@ bool block::check_signature() const
     return false;
 }
 
+std::size_t block::get_maximum_size_median220()
+{
+    /**
+     * (SPV) clients do not have a maximum block size.
+     */
+    if (globals::instance().is_client_spv() == true)
+    {
+        return std::numeric_limits<std::size_t>::max();
+    }
+
+    /**
+     * Skip size limit on checking blocks before the last blockchain
+     * checkpoint or during initial download.
+     */
+    if (
+        globals::instance().best_block_height() <
+        checkpoints::instance().get_total_blocks_estimate() ||
+        utility::is_initial_block_download() == true
+        )
+    {
+        return std::numeric_limits<std::size_t>::max();
+    }
+    
+    /**
+     * 128 Kilobytes
+     */
+    enum { minimum_maximum_size = 128000 };
+
+    /**
+     * The number of blocks to calculate the median over.
+     */
+    enum { blocks_to_go_back = 220 };
+    
+    /**
+     * Get the last block_index.
+     */
+    const auto * index = stack_impl::get_block_index_best();
+    
+    static median_filter<std::size_t> g_median_filter(
+        blocks_to_go_back, minimum_maximum_size
+    );
+    
+    /**
+     * Initialise the median_filter once.
+     */
+    if (g_median_filter.sorted().size() <= 1)
+    {
+        for (auto i = 0; i < blocks_to_go_back; i++)
+        {
+            g_median_filter.input(minimum_maximum_size);
+        }
+    }
+
+    static block_index * g_block_index_last = 0;
+    
+    if (g_block_index_last != index)
+    {
+        g_block_index_last = const_cast<block_index *> (index);
+        
+        static std::recursive_mutex g_mutex_last_block_indexes;
+        
+        std::lock_guard<std::recursive_mutex> l1(g_mutex_last_block_indexes);
+
+        static std::map<const block_index *, std::size_t> g_last_block_indexes;
+        
+        auto it = g_last_block_indexes.begin();
+        
+        while (it != g_last_block_indexes.end())
+        {
+            if (
+                1 + globals::instance().best_block_height() -
+                it->first->height() > blocks_to_go_back
+                )
+            {
+                it = g_last_block_indexes.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
+        /**
+         * Go back by what we want to be median size worth of blocks.
+         */
+        for (auto i = 0; index && i < blocks_to_go_back; i++)
+        {
+            if (g_last_block_indexes.count(index) > 0)
+            {
+                g_median_filter.input(g_last_block_indexes[index]);
+            }
+            else
+            {
+                /**
+                 * Allocate the block.
+                 */
+                block blk;
+                
+                /**
+                 * Read the block from disk.
+                 */
+                if (
+                    blk.read_from_disk(index->file(),
+                    index->block_position()) == true
+                    )
+                {
+                    /**
+                     * Encode to obtain the size in bytes.
+                     */
+                    blk.encode();
+
+                    g_last_block_indexes[index] = blk.size();
+                    
+                    g_median_filter.input(blk.size());
+                }
+            }
+            
+            index = index->block_index_previous();
+        }
+    }
+
+    /**
+     * 768 Kilobytes
+     */
+    enum { maximum_byte_increase = 768000 };
+
+    return std::max(
+        static_cast<std::size_t> (minimum_maximum_size),
+        static_cast<std::size_t> ((g_median_filter.median() <
+        minimum_maximum_size ? minimum_maximum_size :
+        g_median_filter.median()) + maximum_byte_increase)
+    );
+}
+
 std::string block::get_file_path(const std::uint32_t & file_index)
 {
     std::stringstream ss;
     
-    ss << filesystem::data_path() << boost::format("blk%04u.dat") % file_index;
+    std::string block_path = "blockchain/peer/";
+    
+    ss <<
+        filesystem::data_path() << block_path <<
+        boost::format("blk%04u.dat") % file_index
+    ;
 
     return ss.str();
 }
@@ -2626,15 +3713,20 @@ std::shared_ptr<file> block::file_append(std::uint32_t & index)
         {
             if (f->seek_end())
             {
-                enum { max_file_size = 0x02000000 };
+                /**
+                 * The default maximum size is 128 megabytes.
+                 */
+                std::size_t max_file_size = 128;
+                
+                max_file_size *= 1000000;
 
-                if (ftell(f->get_FILE()) < (long)(0x7F000000 - max_file_size))
+                if (ftell(f->get_FILE()) <= max_file_size)
                 {
                     index = current_block_file;
                     
                     return f;
                 }
-                
+
                 f->close();
                 
                 current_block_file++;
@@ -2656,6 +3748,19 @@ std::shared_ptr<file> block::file_append(std::uint32_t & index)
 bool block::check_proof_of_work(const sha256 & hash, const std::uint32_t & bits)
 {
     /**
+     * The genesis block does not use Proof-of-Work, instead a
+     * hard-coded hash of it is used.
+     */
+    if (constants::test_net == true && hash == get_hash_genesis_test_net())
+    {
+        return true;
+    }
+    else if (hash == get_hash_genesis())
+    {
+        return true;
+    }
+    
+    /**
      * Allocate the target
      */
     big_number target;
@@ -2664,16 +3769,6 @@ bool block::check_proof_of_work(const sha256 & hash, const std::uint32_t & bits)
      * Set the compact bits.
      */
     target.set_compact(bits);
-
-    /**
-     * Check the range.
-     */
-    if (target < constants::proof_of_work_limit_ceiling)
-    {
-        throw std::runtime_error("number of bits above maximum work");
-
-        return false;
-    }
 
     /**
      * Check the range.
@@ -2802,4 +3897,25 @@ void block::print()
         ", transactions = " << ss_transactions.str() <<
         ", merkle tree = " << ss_merkle_tree.str() << "."
     );
+}
+
+int block::run_test()
+{
+    auto f1 = block::file_open(1, 0, "rb");
+    
+    if (f1)
+    {
+        printf("block::run_test: test 1 passed!\n");
+    }
+    
+    std::uint32_t index = 1;
+    
+    auto f2 = block::file_append(index);
+    
+    if (f2)
+    {
+        printf("block::run_test: test 2 passed!\n");
+    }
+    
+    return 0;
 }

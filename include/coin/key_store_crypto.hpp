@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -87,11 +87,23 @@ namespace coin {
             bool add_key(const key & k);
         
             /**
+             * Checks if we have the key belonging to the address.
+             * @param address The types::id_key_t.
+             */
+            bool have_key(const types::id_key_t & address) const;
+            
+            /**
              * Gets a key.
              * @param address The address.
              * @param key_out The key_out.
              */
             bool get_key(const types::id_key_t & address, key & key_out) const;
+        
+            /**
+             * Gets keys.
+             * @param addresses The types::id_key_t's.
+             */
+            void get_keys(std::set<types::id_key_t> & addresses) const;
         
             /**
              * Gets a public key.
@@ -103,11 +115,16 @@ namespace coin {
             ) const;
         
             /**
+             * The crypted keys.
+             */
+            const crypted_key_map_t & crypted_keys() const;
+        
+            /**
              * Adds a crypted key.
              * @param public_key The key_public.
              * @param crypted_secret The crypted secret.
              */
-            bool add_crypted_key(
+            virtual bool add_crypted_key(
                 const key_public & public_key,
                 const std::vector<std::uint8_t> & crypted_secret
             );

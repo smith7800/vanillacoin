@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -36,19 +36,35 @@ namespace coin {
 
 class alert;
 class block;
+class block_merkle;
+class block_locator;
+class chainblender_broadcast;
+class chainblender_join;
+class chainblender_leave;
+class chainblender_status;
+class incentive_answer;
+class incentive_collaterals;
+class incentive_question;
+class incentive_sync;
+class incentive_vote;
 class transaction;
+class transaction_bloom_filter;
+class zerotime_answer;
+class zerotime_lock;
+class zerotime_question;
+class zerotime_vote;
 
 namespace protocol {
 
         /**
          * The version.
          */
-        enum { version = 60001 };
-    
+        enum { version = 60051 };
+
         /**
          * The minimum version.
          */
-        enum { minimum_version = 60001 };
+        enum { minimum_version = 60050 };
     
         /**
          * The default peer port.
@@ -60,6 +76,31 @@ namespace protocol {
          */
         enum { default_rpc_port = 9195 };
     
+        /**
+         * The operation modes.
+         * 0x00|0|00000000
+         * 0x01|1|00000001
+         * 0x02|2|00000010
+         * 0x04|4|00000100
+         * 0x08|8|00001000
+         * 0x10|16|00010000
+         * 0x20|32|00100000
+         * 0x40|64|01000000
+         * 0x80|128|10000000
+         */
+        typedef enum operation_mode_s
+        {
+            operation_mode_client = 0x00,
+            operation_mode_peer = 0x01,
+            operation_mode_0x02 = 0x02,
+            operation_mode_0x04 = 0x04,
+            operation_mode_0x08 = 0x08,
+            operation_mode_0x10 = 0x10,
+            operation_mode_0x20 = 0x20,
+            operation_mode_0x40 = 0x40,
+            operation_mode_0x80 = 0x80,
+        } operation_mode_t;
+        
         /**
          * Ihe ipv4 mapped prefix.
          */
@@ -74,7 +115,7 @@ namespace protocol {
         typedef struct network_address_s
         {
             /**
-             * The version .
+             * The version.
              */
             std::uint8_t version;
             
@@ -164,7 +205,7 @@ namespace protocol {
                 std::memset(&ret, 0, sizeof(ret));
                 
                 ret.timestamp = static_cast<std::uint32_t> (std::time(0));
-                ret.services = 1;
+                ret.services = operation_mode_peer;
                 ret.last_try = 0;
                 
                 if (ep.address().is_v4())
@@ -176,6 +217,7 @@ namespace protocol {
                     
                     auto ip = ep.address().to_v4().to_ulong();
                     
+                    // :FIXME:
                     ip = ntohl(ip);
                     
                     std::memcpy(
@@ -209,7 +251,7 @@ namespace protocol {
                 std::memset(&ret, 0, sizeof(ret));
                 
                 ret.timestamp = static_cast<std::uint32_t> (std::time(0));
-                ret.services = 1;
+                ret.services = operation_mode_peer;
                 ret.last_try = 0;
                 ret.address = address;
                 ret.port = 0;
@@ -597,10 +639,27 @@ namespace protocol {
             "ERROR",
             "tx",
             "block",
+#if 0 /* BIP-0037 */
+            "filtered block",
+#endif
+            "ztlock",
+            "ztvote",
+            "ivote",
+#if 1 /* BIP-0037 */
+            "filtered block nonstandard",
+#endif
+            "unkown",
+            "unkown",
+            "unkown",
+            "unkown",
+            "unkown",
+            "unkown",
+            "unkown",
+            "unkown",
         };
     
         /** Message Structures */
-    
+        
         /**
          * The version structure.
          */
@@ -614,6 +673,7 @@ namespace protocol {
             std::uint64_t nonce;
             std::string user_agent;
             std::uint32_t start_height;
+            std::uint8_t relay;
         } version_t;
     
         /**
@@ -681,6 +741,23 @@ namespace protocol {
         } block_t;
     
         /**
+         * The getheaders structure.
+         */
+        typedef struct
+        {
+            std::shared_ptr<block_locator> locator;
+            sha256 hash_stop;
+        } getheaders_t;
+    
+        /**
+         * The headers structure.
+         */
+        typedef struct
+        {
+            std::vector<block> headers;
+        } headers_t;
+    
+        /**
          * The checkpoint structure.
          */
         typedef struct
@@ -705,7 +782,133 @@ namespace protocol {
             std::shared_ptr<alert> a;
         } alert_t;
     
-        /** */
+        /**
+         * The filterload structure.
+         */
+        typedef struct
+        {
+            std::shared_ptr<transaction_bloom_filter> filterload;
+        } filterload_t;
+    
+        /**
+         * The filteradd structure.
+         */
+        typedef struct
+        {
+            std::vector<std::uint8_t> filteradd;
+        } filteradd_t;
+    
+        /**
+         * The merkleblock structure.
+         */
+        typedef struct
+        {
+            std::shared_ptr<block_merkle> merkleblock;
+        } merkleblock_t;
+    
+        /**
+         * The ztlock structure.
+         */
+        typedef struct
+        {
+            std::shared_ptr<zerotime_lock> ztlock;
+        } ztlock_t;
+    
+        /**
+         * The ztquestion structure.
+         */
+        typedef struct
+        {
+            std::shared_ptr<zerotime_question> ztquestion;
+        } ztquestion_t;
+    
+        /**
+         * The ztanswer structure.
+         */
+        typedef struct
+        {
+            std::shared_ptr<zerotime_answer> ztanswer;
+        } ztanswer_t;
+    
+        /**
+         * The ztvote structure.
+         */
+        typedef struct
+        {
+            std::shared_ptr<zerotime_vote> ztvote;
+        } ztvote_t;
+    
+        /**
+         * The ianswer structure.
+         */
+        typedef struct
+        {
+            std::shared_ptr<incentive_answer> ianswer;
+        } ianswer_t;
+    
+        /**
+         * The ivote structure.
+         */
+        typedef struct
+        {
+            std::shared_ptr<incentive_vote> ivote;
+        } ivote_t;
+    
+        /**
+         * The iquestion structure.
+         */
+        typedef struct
+        {
+            std::shared_ptr<incentive_question> iquestion;
+        } iquestion_t;
+    
+        /**
+         * The isync structure.
+         */
+        typedef struct
+        {
+            std::shared_ptr<incentive_sync> isync;
+        } isync_t;
+
+        /**
+         * The icols structure.
+         */
+        typedef struct
+        {
+            std::shared_ptr<incentive_collaterals> icols;
+        } icols_t;
+    
+        /**
+         * The cbjoin structure.
+         */
+        typedef struct
+        {
+            std::shared_ptr<chainblender_join> cbjoin;
+        } cbjoin_t;
+
+        /**
+         * The cbstatus structure.
+         */
+        typedef struct
+        {
+            std::shared_ptr<chainblender_status> cbstatus;
+        } cbstatus_t;
+
+        /**
+         * The cbbroadcast structure.
+         */
+        typedef struct
+        {
+            std::shared_ptr<chainblender_broadcast> cbbroadcast;
+        } cbbroadcast_t;
+
+        /**
+         * The cbleave structure.
+         */
+        typedef struct
+        {
+            std::shared_ptr<chainblender_leave> cbleave;
+        } cbleave_t;
 
         /**
          * The maximum inventory size.
@@ -713,6 +916,7 @@ namespace protocol {
         enum { max_inv_size = 50000 };
     
     } // namespace protocol
+    
 } // namespace coin
 
 #endif // COIN_PROTOCOL_HPP

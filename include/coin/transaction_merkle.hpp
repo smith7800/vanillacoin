@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -25,11 +25,14 @@
 #include <vector>
 
 #include <coin/block.hpp>
+#include <coin/configuration.hpp>
 #include <coin/globals.hpp>
 #include <coin/logger.hpp>
 #include <coin/stack_impl.hpp>
 #include <coin/transaction.hpp>
 #include <coin/transaction_index.hpp>
+#include <coin/transaction_pool.hpp>
+#include <coin/zerotime.hpp>
 
 namespace coin {
 
@@ -76,12 +79,12 @@ namespace coin {
              * Accepts to the memory pool (transaction_pool).
              * @param tx_db The db_tx.
              */
-            bool accept_to_memory_pool(db_tx & tx_db);
+            std::pair<bool, std::string> accept_to_memory_pool(db_tx & tx_db);
         
             /**
              * Accepts to the memory pool (transaction_pool).
              */
-            bool accept_to_memory_pool();
+            std::pair<bool, std::string> accept_to_memory_pool();
     
             /**
              * Gets the number of blocks to maturity.
@@ -93,30 +96,129 @@ namespace coin {
                     return 0;
                 }
                 
+                if (constants::test_net == true)
+                {
+                    return std::max(
+                        0, (constants::coinbase_maturity_test_network + 20) -
+                        get_depth_in_main_chain(false)
+                    );
+                }
+                
                 return std::max(
                     0, (constants::coinbase_maturity + 20) -
-                    get_depth_in_main_chain()
+                    get_depth_in_main_chain(false)
                 );
             }
         
             /**
              * Gets the depth in the main chain.
+             * @param is_zerotime If true this transaction is ZeroTime
+             * protected.
              */
-            int get_depth_in_main_chain() const
+            int get_depth_in_main_chain(const bool & is_zerotime = true) const
             {
-                std::shared_ptr<block_index> index_out;
+                if (globals::instance().is_client_spv() == true)
+                {
+                    int ret = -1;
+                    
+                    ret =
+                        globals::instance().spv_best_block_height() -
+                        m_spv_block_height + 1
+                    ;
+                    
+                    if (m_spv_block_height <= 0)
+                    {
+                        ret = 0;
+                    }
+                    
+                    /**
+                     * ZeroTime protected transactions act as if they have a
+                     * single confirmation.
+                     */
+                    if (
+                        globals::instance().is_zerotime_enabled() && is_zerotime
+                        )
+                    {
+                        if (ret < 1)
+                        {
+                            if (
+                                zerotime::instance().confirmations()[
+                                get_hash()] >= globals::instance(
+                                ).zerotime_answers_minimum()
+                                )
+                            {
+                                /**
+                                 * Use the configured ZeroTime depth.
+                                 */
+                                ret = globals::instance().zerotime_depth();
+                            }
+                        }
+                    }
+                    
+                    return ret > -1 ? ret : 0;
+                }
                 
-                return get_depth_in_main_chain(index_out);
+                block_index * index_out = 0;
+                
+                return get_depth_in_main_chain(index_out, is_zerotime);
+            }
+        
+            /**
+             * Gets the depth in the main chain.
+             * @param index_out The block_index.
+             * @param is_zerotime If true this transaction is ZeroTime
+             * protected.
+             */
+            int get_depth_in_main_chain(
+                block_index * & index_out, const bool & is_zerotime
+                ) const
+            {
+                auto ret = get_depth_in_main_chain_no_zerotime(index_out);
+                
+                if (ret == 0)
+                {
+                    if (
+                        transaction_pool::instance().exists(get_hash()) == false
+                        )
+                    {
+                        return -1;
+                    }
+                }
+
+                /**
+                 * ZeroTime protected transactions act as if they have a
+                 * single confirmation.
+                 */
+                if (globals::instance().is_zerotime_enabled() && is_zerotime)
+                {
+                    if (ret < 1)
+                    {
+                        if (
+                            zerotime::instance().confirmations()[get_hash()] >=
+                            globals::instance().zerotime_answers_minimum()
+                            )
+                        {
+                            /**
+                             * Use the configured ZeroTime depth.
+                             */
+                            ret = globals::instance().zerotime_depth();
+                        }
+                    }
+                }
+
+                return ret;
             }
         
             /**
              * Gets the depth in the main chain.
              * @param index_out The block_index.
              */
-            int get_depth_in_main_chain(
-                std::shared_ptr<block_index> & index_out
+            int get_depth_in_main_chain_no_zerotime(
+                block_index * & index_out
                 ) const
             {
+                int ret = -1;
+                
                 if (m_block_hash == 0 || m_index == -1)
                 {
                     return 0;
@@ -158,19 +260,21 @@ namespace coin {
                 }
 
                 index_out = index;
-                
-                return
+
+                ret =
                     stack_impl::get_block_index_best()->height() -
                     index->height() + 1
                 ;
+
+                return ret;
             }
-        
+
             /**
              * If true it is in the main chain.
              */
             bool is_in_main_chain() const
             {
-                return get_depth_in_main_chain() > 0;
+                return get_depth_in_main_chain(false) > 0;
             }
 
             /**
@@ -195,7 +299,7 @@ namespace coin {
              */
             int set_merkle_branch(block * blk = 0)
             {
-                if (globals::instance().is_client())
+                if (globals::instance().is_client_spv() == true)
                 {
                     if (m_block_hash == 0)
                     {
@@ -331,6 +435,17 @@ namespace coin {
                 return m_index;
             }
         
+            /**
+             * Sets the (SPV) block height.
+             * @param val The value.
+             */
+            void set_spv_block_height(const std::int32_t & val);
+        
+            /**
+             * The (SPV) block height.
+             */
+            const std::int32_t & spv_block_height() const;
+        
         private:
         
             /**
@@ -353,6 +468,12 @@ namespace coin {
              */
             mutable bool m_merkle_verified;
     
+            /**
+             * Ths (SPV) block height.
+             * @note This is not an encoded/decoded variable.
+             */
+            std::int32_t m_spv_block_height;
+            
         protected:
         
             // ...

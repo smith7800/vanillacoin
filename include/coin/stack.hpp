@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -22,6 +22,7 @@
 #define COIN_STACK_HPP
 
 #include <cstdint>
+#include <ctime>
 #include <map>
 #include <string>
 
@@ -91,6 +92,38 @@ namespace coin {
             );
         
             /**
+             * If true a wallet file exists.
+             */
+            static bool wallet_exists(const bool & is_client);
+        
+            /**
+             * Encrypts the wallet.
+             * @param passphrase The passphrase.
+             */
+            void wallet_encrypt(const std::string & passphrase);
+        
+            /**
+             * Locks the wallet.
+             */
+            void wallet_lock();
+            
+            /**
+             * Unlocks the wallet.
+             * @param passphrase The passphrase.
+             */
+            void wallet_unlock(const std::string & passphrase);
+        
+            /**
+             * Changes the wallet passphrase.
+             * @param passphrase_old The old passphrase.
+             * @param password_new The new passphrase.
+             */
+            void wallet_change_passphrase(
+                const std::string & passphrase_old,
+                const std::string & password_new
+            );
+        
+            /**
              * If true the wallet is crypted.
              * @param wallet_id The wallet id.
              */
@@ -101,7 +134,75 @@ namespace coin {
              * @param wallet_id The wallet id.
              */
             bool wallet_is_locked(const std::uint32_t & wallet_id = 0);
-            
+        
+            /**
+             * Performs a ZeroTime lock on the transaction.
+             * @param tx_id The transaction id.
+             */
+            void wallet_zerotime_lock(const std::string & tx_id);
+        
+            /**
+             * Get's the wallet HD keychain seed (if configured).
+             */
+            std::string wallet_hd_keychain_seed();
+        
+            /**
+             * Generates a new wallet address.
+             * @param label The label.
+             */
+            void wallet_generate_address(const std::string & label);
+        
+            /**
+             * Starts chainblender.
+             */
+            void chainblender_start();
+        
+            /**
+             * Stops chainblender.
+             */
+            void chainblender_stop();
+        
+            /**
+             * Sends an RPC command line.
+             * @param command_line The command line.
+             */
+            void rpc_send(const std::string & command_line);
+        
+            /**
+             * Rescans the chain.
+             */
+            void rescan_chain();
+        
+            /**
+             * Sets the wallet.transaction.history.maximum
+             * @param val The value.
+             */
+            void set_configuration_wallet_transaction_history_maximum(
+                const std::time_t & val
+            );
+        
+            /**
+             * The wallet.transaction.history.maximum.
+             */
+            const std::time_t
+                configuration_wallet_transaction_history_maximum() const
+            ;
+        
+            /**
+             * Sets chainblender to use common output denominations.
+             * @param val The value.
+             */
+            void set_configuration_chainblender_use_common_output_denominations(
+                const bool & val
+            );
+        
+            /**
+             * The chainblender.use_common_output_denominations.
+             */
+            const bool
+                configuration_chainblender_use_common_output_denominations()
+            const;
+        
             /**
              * Called when an error occurs.
              * @param pairs The key/value pairs.

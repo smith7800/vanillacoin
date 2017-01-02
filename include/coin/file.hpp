@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -22,6 +22,7 @@
 #define coin_file_hpp
 
 #include <cstdio>
+#include <string>
 
 namespace coin {
 
@@ -62,10 +63,27 @@ namespace coin {
             bool read(char * buf, const std::size_t & len);
 
             /**
-             *
+             * Reads len bytes from the file.
+             * @param buf The buffer.
+             * @param len The length.
+             */
+            bool read(
+                char * buf, std::size_t & len
+            );
+        
+            /**
+             * Writes len bytes of buf to the file.
+             * @param buf The buffer.
+             * @param len The length.
              */
             void write(const char * buf, const std::size_t & len);
     
+            /**
+             * Removes the file at path from disk.
+             * @param path The abslute path.
+             */
+            static bool remove(const std::string & path);
+
             /**
              * The size.
              */

@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -26,6 +26,7 @@
 #include <coin/transaction_pool.hpp>
 #include <coin/wallet.hpp>
 #include <coin/wallet_manager.hpp>
+#include <coin/zerotime.hpp>
 
 using namespace coin;
 
@@ -42,7 +43,7 @@ transaction_pool & transaction_pool::instance()
     return g_transaction_pool;
 }
 
-bool transaction_pool::accept(
+std::pair<bool, std::string> transaction_pool::accept(
     db_tx & dbtx, transaction & tx, bool * missing_inputs
     )
 {
@@ -56,9 +57,7 @@ bool transaction_pool::accept(
      */
     if (tx.check() == false)
     {
-        throw std::runtime_error("check transaction failed");
-    
-        return false;
+        return std::make_pair(false, "check transaction failed");
     }
     
     /**
@@ -66,9 +65,7 @@ bool transaction_pool::accept(
      */
     if (tx.is_coin_base())
     {
-        throw std::runtime_error("coin base as individual transaction");
-    
-        return false;
+        return std::make_pair(false, "coin base as individual transaction");
     }
     
     /**
@@ -76,9 +73,7 @@ bool transaction_pool::accept(
      */
     if (tx.is_coin_stake())
     {
-        throw std::runtime_error("coin stake as individual transaction");
-    
-        return false;
+        return std::make_pair(false, "coin stake as individual transaction");
     }
     
     /**
@@ -86,9 +81,7 @@ bool transaction_pool::accept(
      */
     if (constants::test_net == false && tx.is_standard() == false)
     {
-        throw std::runtime_error("nonstandard transaction type");
-    
-        return false;
+        return std::make_pair(false, "nonstandard transaction type");
     }
     
     /**
@@ -100,12 +93,36 @@ bool transaction_pool::accept(
         
     if (m_transactions.count(hash) > 0)
     {
-        return false;
+        log_debug("Transaction pool failed to accept, hash already found.");
+        
+        return std::make_pair(false, "hash already found");
     }
     
     if (dbtx.contains_transaction(hash))
     {
-        return false;
+        log_error(
+            "Transaction pool failed to accept, db tx contains transaction."
+        );
+        
+        return std::make_pair(false, "db tx contains transaction.");
+    }
+    
+    /**
+     * ZeroTime transaction checking.
+     */
+    if (globals::instance().is_zerotime_enabled())
+    {
+        /**
+         * Check for a zerotime_lock conflict.
+         */
+        if (zerotime::instance().has_lock_conflict(tx))
+        {
+            log_error(
+                "Transaction pool failed to accept, zerotime lock conflict."
+            );
+            
+            return std::make_pair(false, "zerotime lock conflict.");
+        }
     }
     
     /**
@@ -117,34 +134,59 @@ bool transaction_pool::accept(
     {
         auto outpoint = tx.transactions_in()[i].previous_out();
         
-        if (transactions_next_.count(outpoint) > 0)
+        if (m_transactions_next.count(outpoint) > 0)
         {
+#if 1
+            log_error(
+                "Transaction pool failed to accept, replacement "
+                "transaction disabled."
+            );
+            
             /**
              * Disable replacement feature (disabled in reference
              * implementation).
              */
-            return false;
-
+            return std::make_pair(false, "replacement transaction disabled");
+#endif
             /**
              * Allow replacing with a newer version of the same transaction.
              */
             if (i != 0)
             {
-                return false;
+                log_error(
+                    "Transaction pool failed to accept, replacement "
+                    " i != 0."
+                );
+            
+                return std::make_pair(false, "replacement i != 0");
             }
             
             tx_old = const_cast<transaction *> (
-                &transactions_next_[outpoint].get_transaction()
+                &m_transactions_next[outpoint].get_transaction()
             );
             
             if (tx_old->is_final())
             {
-                return false;
+                log_error(
+                    "Transaction pool failed to accept, replacement "
+                    "transaction old is final."
+                );
+            
+                return std::make_pair(
+                    false, "replacement transaction old is final"
+                );
             }
             
             if (tx.is_newer_than(*tx_old) == false)
             {
-                return false;
+                log_error(
+                    "Transaction pool failed to accept, replacement "
+                    "transaction is not newer."
+                );
+            
+                return std::make_pair(
+                    false, "replacement transaction is not newer"
+                );
             }
             
             for (auto & i : tx.transactions_in())
@@ -152,11 +194,18 @@ bool transaction_pool::accept(
                 auto outpoint = i.previous_out();
                 
                 if (
-                    transactions_next_.count(outpoint) == 0 ||
-                    &transactions_next_[outpoint].get_transaction() != tx_old
+                    m_transactions_next.count(outpoint) == 0 ||
+                    &m_transactions_next[outpoint].get_transaction() != tx_old
                     )
                 {
-                    return false;
+                    log_error(
+                        "Transaction pool failed to accept, replacement "
+                        "transaction != tx_old."
+                    );
+            
+                    return std::make_pair(
+                        false, "replacement transaction != tx_old"
+                    );
                 }
             }
             
@@ -189,7 +238,9 @@ bool transaction_pool::accept(
                     hash.to_string().substr(0, 10) << "."
                 );
                 
-                return false;
+                return std::make_pair(
+                    false, "found invalid transaction"
+                );
             }
             
             if (missing_inputs)
@@ -197,7 +248,7 @@ bool transaction_pool::accept(
                 *missing_inputs = true;
             }
             
-            return false;
+            return std::make_pair(false, "failed to fetch inputs");
         }
         
         /**
@@ -212,7 +263,7 @@ bool transaction_pool::accept(
                 "Transaction pool accept failed, nonstandard transaction input."
             );
             
-            return false;
+            return std::make_pair(false, "nonstandard transaction input");
         }
         
         /**
@@ -224,22 +275,32 @@ bool transaction_pool::accept(
         auto fees = tx.get_value_in(inputs) - tx.get_value_out();
         
         /**
+         * Allocate a buffer to contain the encoded transaction.
+         */
+        data_buffer buffer;
+        
+        /**
          * Clear the transaction's buffer.
          */
         tx.clear();
-        
+    
         /**
-         * Encode the transaction to get the size.
+         * Encode the transaction into the buffer.
          */
-        tx.encode();
+        tx.encode(buffer);
+    
+        /**
+         * Get the transaction size.
+         */
+        auto tx_size = buffer.size();
 
         /**
          * Don't accept it if it can't get into a block.
          */
         auto tx_min_fee = tx.get_minimum_fee(
-            1000, false, types::get_minimum_fee_mode_relay, tx.size()
+            1000, false, types::get_minimum_fee_mode_relay, tx_size
         );
-        
+
         if (fees < tx_min_fee)
         {
             log_error(
@@ -247,7 +308,7 @@ bool transaction_pool::accept(
                 hash.to_string() << ", " << fees << "<" <<  tx_min_fee
             );
 
-            return false;
+            return std::make_pair(false, "not enough fees");
         }
 
         /**
@@ -286,15 +347,17 @@ bool transaction_pool::accept(
                     "rejected by rate limiter."
                 );
             
-                return false;
+                return std::make_pair(
+                    false, "free transaction rejected by rate limiter"
+                );
             }
             
             log_debug(
                 "Transaction pool rate limit free count = " <<
-                g_free_count << " => " << g_free_count + tx.size() << "."
+                g_free_count << " => " << g_free_count + tx_size << "."
             );
 
-            g_free_count += tx.size();
+            g_free_count += tx_size;
         }
         
         /**
@@ -307,12 +370,12 @@ bool transaction_pool::accept(
             false, false) == false
             )
         {
-            log_error(
+            log_debug(
                 "Transaction pool connect inputs failed " <<
                 hash.to_string().substr(0, 10) << "."
             );
             
-            return false;
+            return std::make_pair(false, "connect inputs failed");
         }
     }
     
@@ -344,7 +407,108 @@ bool transaction_pool::accept(
         ", pool size = " << m_transactions.size() << "."
     );
 
-    return true;
+    return std::make_pair(true, "");
+}
+
+std::pair<bool, std::string> transaction_pool::acceptable(transaction & tx)
+{
+    /**
+     * Check the transaction.
+     */
+    if (tx.check() == false)
+    {
+        return std::make_pair(false, "check transaction failed");
+    }
+    
+    /**
+     * Coinbase is only valid in a block, not as a loose transaction.
+     */
+    if (tx.is_coin_base())
+    {
+        return std::make_pair(false, "coin base as individual transaction");
+    }
+    
+    /**
+     * Coinstake is only valid in a block, not as a loose transaction.
+     */
+    if (tx.is_coin_stake())
+    {
+        return std::make_pair(false, "coin stake as individual transaction");
+    }
+    
+    /**
+     * Do we already have it.
+     */
+    auto hash = tx.get_hash();
+
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+        
+    if (m_transactions.count(hash) > 0)
+    {
+        return std::make_pair(false, "hash already found");
+    }
+    
+    /**
+     * Check for conflicts with in-memory transactions.
+     */
+    for (auto i = 0; i < tx.transactions_in().size(); i++)
+    {
+        auto outpoint = tx.transactions_in()[i].previous_out();
+        
+        if (m_transactions_next.count(outpoint) > 0)
+        {
+            /**
+             * Disable replacement feature (disabled in reference
+             * implementation).
+             */
+            return std::make_pair(false, "replacement transaction disabled");
+        }
+    }
+
+    db_tx txdb("r");
+    
+    /**
+     * We always check the inputs.
+     */
+    bool check_inputs = true;
+    
+    if (check_inputs)
+    {
+        transaction::previous_t inputs;
+        
+        std::map<sha256, transaction_index> unused;
+        
+        bool invalid = false;
+        
+        if (
+            tx.fetch_inputs(txdb, unused, false, false, inputs,
+            invalid) == false
+            )
+        {
+            if (invalid)
+            {
+                return std::make_pair(
+                    false, "found invalid transaction"
+                );
+            }
+            
+            return std::make_pair(false, "failed to fetch inputs");
+        }
+        
+        /**
+         * Check against previous transactions.
+         */
+        if (
+            tx.connect_inputs(txdb, inputs, unused,
+            transaction_position(1, 1, 1), stack_impl::get_block_index_best(),
+            false, false, true, false) == false
+            )
+        {
+            return std::make_pair(false, "connect inputs failed");
+        }
+    }
+    
+    return std::make_pair(true, "");
 }
         
 bool transaction_pool::remove(transaction & tx)
@@ -357,7 +521,7 @@ bool transaction_pool::remove(transaction & tx)
     {
         for (auto & i : tx.transactions_in())
         {
-            transactions_next_.erase(i.previous_out());
+            m_transactions_next.erase(i.previous_out());
         }
         
         m_transactions.erase(hash);
@@ -373,7 +537,7 @@ void transaction_pool::clear()
     std::lock_guard<std::recursive_mutex> l1(mutex_);
     
     m_transactions.clear();
-    transactions_next_.clear();
+    m_transactions_next.clear();
     
     ++m_transactions_updated;
 }
@@ -413,6 +577,14 @@ transaction & transaction_pool::lookup(const sha256 & hash)
     return m_transactions[hash];
 }
 
+const std::map<point_out, point_in> &
+    transaction_pool::transactions_next() const
+{
+    std::lock_guard<std::recursive_mutex> l1(mutex_);
+    
+    return m_transactions_next;
+}
+
 std::map<sha256, transaction> & transaction_pool::transactions()
 {
     std::lock_guard<std::recursive_mutex> l1(mutex_);
@@ -435,7 +607,7 @@ bool transaction_pool::add_unchecked(const sha256 & hash, transaction & tx)
     
     for (auto i = 0; i < tx.transactions_in().size(); i++)
     {
-        transactions_next_[
+        m_transactions_next[
             tx.transactions_in()[i].previous_out()
         ] = point_in(m_transactions[hash], i);
     }

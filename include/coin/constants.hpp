@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -42,12 +42,12 @@ namespace constants {
     /**
      * The client version minor.
      */
-    enum { version_client_minor = 1 };
+    enum { version_client_minor = 5 };
 
     /**
      * The client version revision.
      */
-    enum { version_client_revision = 7 };
+    enum { version_client_revision = 0 };
     
     /**
      * The client version build.
@@ -70,12 +70,12 @@ namespace constants {
     /**
      * The version string.
      */
-    static const std::string version_string = "0.1.7";
+    static const std::string version_string = "0.5.0";
     
     /**
      * The name of the coin.
      */
-    static const std::string client_name = "Vanillacoin";
+    static const std::string client_name = "Vcash";
 
     /**
      * A coin.
@@ -108,26 +108,6 @@ namespace constants {
     static const std::int64_t min_txout_amount = min_tx_fee;
 
     /**
-     * The maximum block size.
-     */
-    static const auto max_block_size = 1000000;
-    
-    /**
-     * The maximum number of orphan transactions.
-     */
-    enum { max_orphan_transactions = max_block_size / 100 };
-    
-    /**
-     * The maximum block size gen.
-     */
-    static const auto max_block_size_gen = max_block_size / 2;
-    
-    /**
-     * The maximum sig ops.
-     */
-    static const auto max_block_sig_ops = max_block_size / 50;
-
-    /**
      * The chain start time.
      */
     static const std::int64_t chain_start_time = 1419310800;
@@ -136,6 +116,11 @@ namespace constants {
      * The number of blocks after which a coin matures.
      */
     enum { coinbase_maturity = 200 };
+    
+    /**
+     * The number of blocks after which a coin matures on a test network.
+     */
+    enum { coinbase_maturity_test_network = 1 };
     
     /**
      * The initial proof of work limit.
@@ -188,17 +173,6 @@ namespace constants {
      * The proof-of-work cutoff block.
      */
     enum { pow_cutoff_block = 2147483647 - 1 };
-    
-    /**
-     * The minimum version in which to exchange addresses with.
-     */
-    enum { min_addr_version = 60002 };
-    
-    /**
-     * Support for the "mempool" command, enhanced "getdata" behavior
-     * starts with this version.
-     */
-    enum { mempool_getdata_version = 60002 };
 
 } // namespace constants
 } // namespace coin

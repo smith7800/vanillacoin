@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -18,16 +18,21 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdexcept>
 #include <sstream>
 
+#if (defined USE_TLS && USE_TLS)
 #include <openssl/ssl.h>
+#endif //USE_TLS
 
 #include <coin/globals.hpp>
 #include <coin/logger.hpp>
+#include <coin/tcp_acceptor.hpp>
 #include <coin/tcp_transport.hpp>
 
 using namespace coin;
 
+#if (defined USE_TLS && USE_TLS)
 boost::system::error_code use_private_key(SSL_CTX * ctx, char * buf)
 {
     boost::system::error_code ec;
@@ -145,8 +150,7 @@ boost::system::error_code use_certificate_chain(SSL_CTX * ctx, char * buf)
 		
     if (ctx->extra_certs != 0)
     {
-        sk_X509_pop_free(ctx->extra_certs, X509_free);
-        ctx->extra_certs = 0;
+        sk_X509_pop_free(ctx->extra_certs, X509_free), ctx->extra_certs = 0;
     }
 
     while (
@@ -195,9 +199,11 @@ void print_cipher_list(const SSL * s)
     
     log_debug(ss.str());
 }
+#endif // USE_TLS
 
 tcp_transport::tcp_transport(
-    boost::asio::io_service & ios, boost::asio::strand & s
+    boost::asio::io_service & ios, boost::asio::strand & s,
+    const bool & use_static_ssl_context
     )
     : m_state(state_disconnected)
     , m_close_after_writes(false)
@@ -207,14 +213,83 @@ tcp_transport::tcp_transport(
     , m_time_last_write(0)
     , io_service_(ios)
     , strand_(s)
-    , connect_timeout_timer_(ios)
-    , read_timeout_timer_(ios)
-    , write_timeout_timer_(ios)
+    , connect_timeout_timer_(io_service_)
+    , read_timeout_timer_(io_service_)
+    , write_timeout_timer_(io_service_)
 #if (defined __IPHONE_OS_VERSION_MAX_ALLOWED)
     , readStreamRef_(0)
     , writeStreamRef_(0)
 #endif // __IPHONE_OS_VERSION_MAX_ALLOWED
 {
+#if (defined USE_TLS && USE_TLS)
+
+    /**
+     * The static boost::asio::ssl::context.
+     */
+    static std::shared_ptr<boost::asio::ssl::context> g_ssl_context;
+    
+    /**
+     * This key/pair is safe in public hands. It is for web browser
+     * compatibility (testing) and serves no other purpose.
+     */
+
+    /**
+     * The private key.
+     */
+    static char key_buf[] =
+    {
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIICXAIBAAKBgQDygv8O6KuUO2MhiL51oTHJC7ELRbg8i9NHAZv/etJjEMCEcSYN\n"
+        "Ma017BqUnjsdyb8mTKaGbwITdHpcWpbPhAWZnD3l1u8Kf0Wl4PHkYipdwkx6r53J\n"
+        "l+fKLjrQ1sekoqHkmpKdFGLimzdbQGPCd5RwWhVVE6W81tGNKANf+wN3XQIDAQAB\n"
+        "AoGARxd3xdsXUWEHcnEvxDP48ELpJ7DMjZM/4HTsUjyjKD9k8G5rBTsm18PbFu47\n"
+        "zkOyMXwO5SHtrd5bcG9t/m9pZEh/HqPqcaJemZYsuJgAMYAXoVbgb3FVFkMYYH0U\n"
+        "JAlHiVkFberR4GK0wDe74wXn7vnCrEAw/DMj37WSxZ9gFoECQQD5T2IBsD008rLi\n"
+        "LL/Zmi4JW/Iab3yoUa5qebNL6HpJVuOTEKNFa03nVOOxCed98J1RPcBeWY6MRHCU\n"
+        "dFAFwxkFAkEA+QTpmHgGhhH6IIgTyaHPCEnKv3o43xwOizienZ/9c4W0pJljf8Qa\n"
+        "iADqakC23f260FJ2xMqab28Q1MPXDutUeQJAMDqBFR6I2KNSo5pQisHewgS9cwu6\n"
+        "K72RZhug6cBRV7qtT5faXeWCLownd+oYlC5l4H93pUjh4JSkyrMtf8/cGQJBAMmE\n"
+        "/DVzDHR7H9wrwzetRooCjZ0fH98OKYbpLxOIYeeXEHUT3L2MyZu+gfWyoUpNB12H\n"
+        "Hq5q90eurgRA6E0ejKECQG5Q4uC9uoomCS5IQeyF5d1+dXJp9YjyCF158CjxsjUZ\n"
+        "Q0a0EqGGuTBCz8YcFhFYIOyRaOQjbJVTckztXDl2ABw=\n"
+        "-----END RSA PRIVATE KEY-----\n"
+    };
+    
+    /**
+     * The chain file (public and private key).
+     */
+    static char chain_buf[] =
+    {
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIICXAIBAAKBgQDygv8O6KuUO2MhiL51oTHJC7ELRbg8i9NHAZv/etJjEMCEcSYN\n"
+        "Ma017BqUnjsdyb8mTKaGbwITdHpcWpbPhAWZnD3l1u8Kf0Wl4PHkYipdwkx6r53J\n"
+        "l+fKLjrQ1sekoqHkmpKdFGLimzdbQGPCd5RwWhVVE6W81tGNKANf+wN3XQIDAQAB\n"
+        "AoGARxd3xdsXUWEHcnEvxDP48ELpJ7DMjZM/4HTsUjyjKD9k8G5rBTsm18PbFu47\n"
+        "zkOyMXwO5SHtrd5bcG9t/m9pZEh/HqPqcaJemZYsuJgAMYAXoVbgb3FVFkMYYH0U\n"
+        "JAlHiVkFberR4GK0wDe74wXn7vnCrEAw/DMj37WSxZ9gFoECQQD5T2IBsD008rLi\n"
+        "LL/Zmi4JW/Iab3yoUa5qebNL6HpJVuOTEKNFa03nVOOxCed98J1RPcBeWY6MRHCU\n"
+        "dFAFwxkFAkEA+QTpmHgGhhH6IIgTyaHPCEnKv3o43xwOizienZ/9c4W0pJljf8Qa\n"
+        "iADqakC23f260FJ2xMqab28Q1MPXDutUeQJAMDqBFR6I2KNSo5pQisHewgS9cwu6\n"
+        "K72RZhug6cBRV7qtT5faXeWCLownd+oYlC5l4H93pUjh4JSkyrMtf8/cGQJBAMmE\n"
+        "/DVzDHR7H9wrwzetRooCjZ0fH98OKYbpLxOIYeeXEHUT3L2MyZu+gfWyoUpNB12H\n"
+        "Hq5q90eurgRA6E0ejKECQG5Q4uC9uoomCS5IQeyF5d1+dXJp9YjyCF158CjxsjUZ\n"
+        "Q0a0EqGGuTBCz8YcFhFYIOyRaOQjbJVTckztXDl2ABw=\n"
+        "-----END RSA PRIVATE KEY-----\n"
+        "-----BEGIN CERTIFICATE-----\n"
+        "MIICATCCAWoCCQCr5V+G3Ch9MDANBgkqhkiG9w0BAQUFADBFMQswCQYDVQQGEwJB\n"
+        "VTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50ZXJuZXQgV2lkZ2l0\n"
+        "cyBQdHkgTHRkMB4XDTE0MTIwODAwMzk1MFoXDTI0MTIwNTAwMzk1MFowRTELMAkG\n"
+        "A1UEBhMCQVUxEzARBgNVBAgMClNvbWUtU3RhdGUxITAfBgNVBAoMGEludGVybmV0\n"
+        "IFdpZGdpdHMgUHR5IEx0ZDCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEA8oL/\n"
+        "DuirlDtjIYi+daExyQuxC0W4PIvTRwGb/3rSYxDAhHEmDTGtNewalJ47Hcm/Jkym\n"
+        "hm8CE3R6XFqWz4QFmZw95dbvCn9FpeDx5GIqXcJMeq+dyZfnyi460NbHpKKh5JqS\n"
+        "nRRi4ps3W0BjwneUcFoVVROlvNbRjSgDX/sDd10CAwEAATANBgkqhkiG9w0BAQUF\n"
+        "AAOBgQDLQ55GLq7gubsV1CdGK4g3jPPc+nPSpiEToepqkIdjz98O5TIVGGvjKoDU\n"
+        "K/rBXEg5tHPrDtvi/M8gQ/7Xn5oF8RB3h0CJ9gc2zA9VdDpOWvPc/Ha/xuOrzHBR\n"
+        "EoiESyrxBQinuRqjAfUCbGN1kCbrr5R4g7ocljNnbx4HUQzjFQ==\n"
+        "-----END CERTIFICATE-----\n"
+    };
+    
     /**
      * The temporary Diffie–Hellman parameters.
      */
@@ -226,84 +301,199 @@ tcp_transport::tcp_transport(
         "-----END DH PARAMETERS-----\n"
     };
     
-    /**
-     * Allocate the boost::asio::ssl::context.
-     */
-    m_ssl_context.reset(
-        new boost::asio::ssl::context(boost::asio::ssl::context::tlsv1)
-    );
-    
-    /** 
-     * Set the options.
-     */
-    m_ssl_context->set_options(
-        boost::asio::ssl::context::default_workarounds | 
-        boost::asio::ssl::context::no_sslv2 | 
-        boost::asio::ssl::context::single_dh_use
-    );
-
-
-    /**
-     * Use temporary Diffie-Hellman paramaters.
-     */
-    use_tmp_dh(m_ssl_context->impl(), tmp_dh_buf);
-    
-    /**
-     * Replace with SSL_CTX_set_ecdh_auto when supported.
-     */
-    EC_KEY * ecdh = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-    
-    /**
-     * Set the temporary Elliptic Curve Diffie-Hellman.
-     */
-    if (ecdh)
+    if (use_static_ssl_context == true)
     {
-        if (SSL_CTX_set_tmp_ecdh(m_ssl_context->impl(), ecdh) != 1)
+        if (g_ssl_context == nullptr)
         {
-            log_error("TCP transport failed to set SSL_CTX_set_tmp_ecdh.");
+            /**
+             * Allocate the boost::asio::ssl::context.
+             */
+            g_ssl_context.reset(
+                new boost::asio::ssl::context(boost::asio::ssl::context::tlsv1)
+            );
+            
+            /** 
+             * Set the options.
+             */
+            g_ssl_context->set_options(
+                boost::asio::ssl::context::default_workarounds | 
+                boost::asio::ssl::context::no_sslv2 |
+                boost::asio::ssl::context::single_dh_use
+            );
+
+            /**
+             * Use a certificate chain.
+             */
+            use_certificate_chain(g_ssl_context->impl(), chain_buf);
+
+            /** 
+             * Use a private key.
+             */
+            use_private_key(g_ssl_context->impl(), key_buf);
+
+            /**
+             * Use temporary Diffie-Hellman paramaters.
+             */
+            use_tmp_dh(g_ssl_context->impl(), tmp_dh_buf);
+            
+            /**
+             * Replace with SSL_CTX_set_ecdh_auto when supported.
+             */
+            EC_KEY * ecdh = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+            
+            /**
+             * Set the temporary Elliptic Curve Diffie-Hellman.
+             */
+            if (ecdh)
+            {
+                if (SSL_CTX_set_tmp_ecdh(g_ssl_context->impl(), ecdh) != 1)
+                {
+                    log_error(
+                        "TCP transport failed to set SSL_CTX_set_tmp_ecdh."
+                    );
+                }
+                
+                EC_KEY_free(ecdh);
+            }
+
+            /**
+             * Allocate the cipher list.
+             */
+            std::string cipher_list;
+            
+            /**
+             * Create the cipher list.
+             * + TLS_ECDH_RSA_WITH_AES_256_SHA         ECDHE-RSA-AES256-SHA
+             * + TLS_ECDH_anon_WITH_RC4_128_SHA        AECDH-RC4-SHA
+             * + TLS_ECDH_anon_WITH_3DES_EDE_CBC_SHA   AECDH-DES-CBC3-SHA
+             * + TLS_ECDH_anon_WITH_AES_128_CBC_SHA    AECDH-AES128-SHA
+             * + TLS_ECDH_anon_WITH_AES_256_CBC_SHA    AECDH-AES256-SHA
+             */
+            cipher_list += "ECDHE-RSA-AES256-SHA";
+            cipher_list += " ";
+            cipher_list += "AECDH-RC4-SHA";
+            cipher_list += " ";
+            cipher_list += "AECDH-DES-CBC3-SHA";
+            cipher_list += " ";
+            cipher_list += "AECDH-AES128-SHA";
+            cipher_list += " ";
+            cipher_list += "AECDH-AES256-SHA";
+            cipher_list += " ";
+            
+            /**
+             * Set the cipher list.
+             */
+            if (
+                SSL_CTX_set_cipher_list(g_ssl_context->impl(),
+                cipher_list.c_str()) != 1
+                )
+            {
+                log_error("SSL_CTX_set_cipher_list failed.");
+            }
         }
-        
-        EC_KEY_free(ecdh);
-    }
 
-    /**
-     * Allocate the cipher list.
-     */
-    std::string cipher_list;
-    
-    /**
-     * Create the cipher list.
-     * + TLS_ECDH_anon_WITH_RC4_128_SHA        AECDH-RC4-SHA
-     * + TLS_ECDH_anon_WITH_3DES_EDE_CBC_SHA   AECDH-DES-CBC3-SHA
-     * + TLS_ECDH_anon_WITH_AES_128_CBC_SHA    AECDH-AES128-SHA
-     * + TLS_ECDH_anon_WITH_AES_256_CBC_SHA    AECDH-AES256-SHA
-     */
-    cipher_list += "AECDH-RC4-SHA";
-    cipher_list += " ";
-    cipher_list += "AECDH-DES-CBC3-SHA";
-    cipher_list += " ";
-    cipher_list += "AECDH-AES128-SHA";
-    cipher_list += " ";
-    cipher_list += "AECDH-AES256-SHA";
-    cipher_list += " ";
-    
-    /**
-     * Set the cipher list.
-     */
-    if (
-        SSL_CTX_set_cipher_list(m_ssl_context->impl(), cipher_list.c_str()) != 1
-        )
+        /**
+         * Allocate the socket.
+         */
+        m_socket.reset(
+            new boost::asio::ssl::stream<boost::asio::ip::tcp::socket> (
+            ios, *g_ssl_context))
+        ;
+    }
+    else
     {
-        log_error("SSL_CTX_set_cipher_list failed.");
-    }
+        /**
+         * Allocate the boost::asio::ssl::context.
+         */
+        m_ssl_context.reset(
+            new boost::asio::ssl::context(boost::asio::ssl::context::tlsv1)
+        );
+        
+        /** 
+         * Set the options.
+         */
+        m_ssl_context->set_options(
+            boost::asio::ssl::context::default_workarounds | 
+            boost::asio::ssl::context::no_sslv2 |
+            boost::asio::ssl::context::single_dh_use
+        );
 
-    /**
-     * Allocate the socket.
-     */
-    m_socket.reset(
-        new boost::asio::ssl::stream<boost::asio::ip::tcp::socket> (
-        ios, *m_ssl_context))
-    ;
+        /**
+         * Use a certificate chain.
+         */
+        use_certificate_chain(m_ssl_context->impl(), chain_buf);
+
+        /** 
+         * Use a private key.
+         */
+        use_private_key(m_ssl_context->impl(), key_buf);
+
+        /**
+         * Use temporary Diffie-Hellman paramaters.
+         */
+        use_tmp_dh(m_ssl_context->impl(), tmp_dh_buf);
+        
+        /**
+         * Replace with SSL_CTX_set_ecdh_auto when supported.
+         */
+        EC_KEY * ecdh = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+        
+        /**
+         * Set the temporary Elliptic Curve Diffie-Hellman.
+         */
+        if (ecdh)
+        {
+            if (SSL_CTX_set_tmp_ecdh(m_ssl_context->impl(), ecdh) != 1)
+            {
+                log_error("TCP transport failed to set SSL_CTX_set_tmp_ecdh.");
+            }
+            
+            EC_KEY_free(ecdh);
+        }
+
+        /**
+         * Allocate the cipher list.
+         */
+        std::string cipher_list;
+        
+        /**
+         * Create the cipher list.
+         * + TLS_ECDH_RSA_WITH_AES_256_SHA         ECDHE-RSA-AES256-SHA
+         * + TLS_ECDH_anon_WITH_RC4_128_SHA        AECDH-RC4-SHA
+         * + TLS_ECDH_anon_WITH_3DES_EDE_CBC_SHA   AECDH-DES-CBC3-SHA
+         * + TLS_ECDH_anon_WITH_AES_128_CBC_SHA    AECDH-AES128-SHA
+         * + TLS_ECDH_anon_WITH_AES_256_CBC_SHA    AECDH-AES256-SHA
+         */
+        cipher_list += "ECDHE-RSA-AES256-SHA";
+        cipher_list += " ";
+        cipher_list += "AECDH-RC4-SHA";
+        cipher_list += " ";
+        cipher_list += "AECDH-DES-CBC3-SHA";
+        cipher_list += " ";
+        cipher_list += "AECDH-AES128-SHA";
+        cipher_list += " ";
+        cipher_list += "AECDH-AES256-SHA";
+        cipher_list += " ";
+        
+        /**
+         * Set the cipher list.
+         */
+        if (
+            SSL_CTX_set_cipher_list(m_ssl_context->impl(),
+            cipher_list.c_str()) != 1
+            )
+        {
+            log_error("SSL_CTX_set_cipher_list failed.");
+        }
+
+        /**
+         * Allocate the socket.
+         */
+        m_socket.reset(
+            new boost::asio::ssl::stream<boost::asio::ip::tcp::socket> (
+            ios, *m_ssl_context))
+        ;
+    }
     
     /**
      * Set the verify mode.
@@ -317,6 +507,9 @@ tcp_transport::tcp_transport(
          */
         print_cipher_list(m_socket->native_handle());
     }
+#else
+    m_socket.reset(new boost::asio::ip::tcp::socket(ios));
+#endif // USE_TLS
 }
 
 tcp_transport::~tcp_transport()
@@ -360,6 +553,11 @@ void tcp_transport::start(
         }
         else
         {
+            log_none(
+                "TCP transport connect operation timed out after 8 "
+                "seconds, closing."
+            );
+            
             /**
              * Stop
              */
@@ -395,13 +593,19 @@ void tcp_transport::start()
 {
     auto self(shared_from_this());
     
+#if (defined USE_TLS && USE_TLS)
     if (m_socket)
     {
         m_socket->async_handshake(boost::asio::ssl::stream_base::server,
-            [this, self](boost::system::error_code ec)
+            strand_.wrap([this, self](boost::system::error_code ec)
         {
             if (ec)
             {
+                log_error(
+                    "TCP transport handshake failed, message = " <<
+                    ec.message() << "."
+                );
+                
                 /**
                  * Stop.
                  */
@@ -413,8 +617,13 @@ void tcp_transport::start()
                 
                 do_read();
             }
-        });
+        }));
     }
+#else
+    m_state = state_connected;
+        
+    do_read();
+#endif // USE_TLS
 }
         
 void tcp_transport::stop()
@@ -422,6 +631,31 @@ void tcp_transport::stop()
     if (m_state != state_disconnected)
     {
         auto self(shared_from_this());
+
+#if (defined USE_TLS && USE_TLS)
+        /**
+         * This can cause a deadlock in OpenSSL under specific conditions
+         * related to it's asio integration and blocking behaviour. We will
+         * keep it disabled for some time before complete removal because it
+         * is not required in "ungraceful" autonomous environments.
+         */
+#if 0
+        if (m_socket)
+        {
+            try
+            {
+                m_socket->shutdown();
+            }
+            catch (std::exception & e)
+            {
+                log_debug(
+                    "TCP transport failed to shutdown SSL, what = " <<
+                    e.what() << "."
+                );
+            }
+        }
+#endif // #if 0
+#endif // USE_TLS
 
         /**
          * Set the state to state_disconnected.
@@ -479,7 +713,7 @@ void tcp_transport::set_on_read(
 }
 
 void tcp_transport::write(const char * buf, const std::size_t & len)
-{
+{    
     auto self(shared_from_this());
     
     std::vector<char> buffer(buf, buf + len);
@@ -489,7 +723,7 @@ void tcp_transport::write(const char * buf, const std::size_t & len)
         io_service_.post(strand_.wrap(
             [this, self, buffer]()
         {
-            bool write_in_progress = write_queue_.size() > 0;
+            auto write_in_progress = write_queue_.size() > 0;
             
             write_queue_.push_back(buffer);
           
@@ -526,11 +760,19 @@ const std::string & tcp_transport::identifier() const
     return m_identifier;
 }
 
+#if (defined USE_TLS && USE_TLS)
 boost::asio::ssl::stream<
     boost::asio::ip::tcp::socket
 >::lowest_layer_type & tcp_transport::socket()
+#else
+boost::asio::ip::tcp::socket & tcp_transport::socket()
+#endif // USE_TLS
 {
+#if (defined USE_TLS && USE_TLS)
     return m_socket->lowest_layer();
+#else
+    return *m_socket;
+#endif // USE_TLS
 }
 
 void tcp_transport::set_close_after_writes(const bool & flag)
@@ -565,7 +807,7 @@ void tcp_transport::do_connect(const boost::asio::ip::tcp::endpoint & ep)
     m_state = state_connecting;
 
     m_socket->lowest_layer().async_connect(ep,
-        [this, self](boost::system::error_code ec)
+        strand_.wrap([this, self](boost::system::error_code ec)
     {
         if (ec)
         {
@@ -581,8 +823,9 @@ void tcp_transport::do_connect(const boost::asio::ip::tcp::endpoint & ep)
         }
         else
         {
+#if (defined USE_TLS && USE_TLS)
             m_socket->async_handshake(boost::asio::ssl::stream_base::client,
-                [this, self](boost::system::error_code ec)
+                strand_.wrap([this, self](boost::system::error_code ec)
             {
                 if (ec)
                 {
@@ -617,9 +860,28 @@ void tcp_transport::do_connect(const boost::asio::ip::tcp::endpoint & ep)
                     
                     do_read();
                 }
-            });
+            }));
+#else
+            connect_timeout_timer_.cancel();
+            
+            m_state = state_connected;
+            
+            if (m_on_complete)
+            {
+                m_on_complete(ec, self);
+            }
+    
+            if (write_queue_.size() > 0)
+            {
+                do_write(
+                    &write_queue_.front()[0], write_queue_.front().size()
+                );
+            }
+            
+            do_read();
+#endif // USE_TLS
         }
-    });
+    }));
 #if (defined __IPHONE_OS_VERSION_MAX_ALLOWED)
     set_voip();
 #endif // __IPHONE_OS_VERSION_MAX_ALLOWED
@@ -634,7 +896,7 @@ void tcp_transport::do_connect(
     m_state = state_connecting;
     
     boost::asio::async_connect(m_socket->lowest_layer(), endpoint_iterator,
-        [this, self](boost::system::error_code ec,
+        strand_.wrap([this, self](boost::system::error_code ec,
         boost::asio::ip::tcp::resolver::iterator)
     {
         if (ec)
@@ -654,8 +916,9 @@ void tcp_transport::do_connect(
         }
         else
         {
+#if (defined USE_TLS && USE_TLS)
             m_socket->async_handshake(boost::asio::ssl::stream_base::client,
-                [this, self](boost::system::error_code ec)
+                strand_.wrap([this, self](boost::system::error_code ec)
             {
                 if (ec)
                 {
@@ -693,9 +956,28 @@ void tcp_transport::do_connect(
                     
                     do_read();
                 }
-            });
+            }));
+#else
+            connect_timeout_timer_.cancel();
+            
+            m_state = state_connected;
+            
+            if (m_on_complete)
+            {
+                m_on_complete(ec, self);
+            }
+    
+            if (write_queue_.size() > 0)
+            {
+                do_write(
+                    &write_queue_.front()[0], write_queue_.front().size()
+                );
+            }
+            
+            do_read();
+#endif // USE_TLS
         }
-    });
+    }));
 #if (defined __IPHONE_OS_VERSION_MAX_ALLOWED)
     set_voip();
 #endif // __IPHONE_OS_VERSION_MAX_ALLOWED
@@ -732,7 +1014,8 @@ void tcp_transport::do_read()
         }
         
         m_socket->async_read_some(boost::asio::buffer(read_buffer_),
-            [this, self](boost::system::error_code ec, std::size_t len)
+            strand_.wrap([this, self](boost::system::error_code ec,
+            std::size_t len)
         {
             if (ec)
             {
@@ -760,12 +1043,22 @@ void tcp_transport::do_read()
                  */
                 if (m_on_read)
                 {
-                    m_on_read(self, read_buffer_, len);
+                    try
+                    {
+                        m_on_read(self, read_buffer_, len);
+                    }
+                    catch (std::exception & e)
+                    {
+                        log_error(
+                            "TCP transport on_read callback failed, what = " <<
+                            e.what() << "."
+                        );
+                    }
                 }
                 
                 do_read();
             }
-        });
+        }));
     }
 }
 
@@ -800,7 +1093,7 @@ void tcp_transport::do_write(const char * buf, const std::size_t & len)
         }
 
         boost::asio::async_write(*m_socket, boost::asio::buffer(buf, len),
-            [this, self](boost::system::error_code ec,
+            strand_.wrap([this, self](boost::system::error_code ec,
             std::size_t bytes_transferred)
         {
             if (ec)
@@ -842,16 +1135,19 @@ void tcp_transport::do_write(const char * buf, const std::size_t & len)
                     );
                 }
             }
-        });
+        }));
     }
 }
 
 void tcp_transport::set_voip()
 {
+#define USE_IOS_VOIP_FLAG 0
+
+#if (defined USE_IOS_VOIP_FLAG && USE_IOS_VOIP_FLAG)
 #if (defined __IPHONE_OS_VERSION_MAX_ALLOWED)
     CFStreamCreatePairWithSocket(
-        0, (CFSocketNativeHandle)m_socket->native(), &readStreamRef_,
-        &writeStreamRef_
+        0, (CFSocketNativeHandle)m_socket->lowest_layer().native(),
+        &readStreamRef_, &writeStreamRef_
     );
 
     if (
@@ -898,4 +1194,45 @@ void tcp_transport::set_voip()
         log_error("TCP transport unable open write stream.");
     }
 #endif // __IPHONE_OS_VERSION_MAX_ALLOWED
+#endif // USE_IOS_VOIP_FLAG
+}
+
+int tcp_transport::run_test()
+{
+    boost::asio::io_service ios;
+    
+    boost::asio::strand s(ios);
+    
+    std::shared_ptr<tcp_transport> t =
+        std::make_shared<tcp_transport>(ios, s)
+    ;
+    
+    t->start("google.com", 80,
+        [](boost::system::error_code ec, std::shared_ptr<tcp_transport> t)
+    {
+        if (ec)
+        {
+            std::cerr <<
+                "tcp_transport connect failed, message = " <<
+                ec.message() <<
+            std::endl;
+        }
+        else
+        {
+            std::cout <<
+                "tcp_transport connect success" <<
+            std::endl;
+            
+            std::stringstream ss;
+            ss << "GET" << " "  << "/" << " HTTP/1.0\r\n";
+            ss << "Host: " << "google.com" << "\r\n";
+            ss << "Accept: */*\r\n";
+            ss << "Connection: close\r\n\r\n";
+            t->write(ss.str().data(), ss.str().size());
+        }
+    });
+    
+    ios.run();
+
+    return 0;
 }

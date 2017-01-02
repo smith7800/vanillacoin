@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -22,7 +22,6 @@
 
 #include <boost/asio.hpp>
 
-#include <coin/http_transport.hpp>
 #include <coin/logger.hpp>
 #include <coin/protocol.hpp>
 #include <coin/tcp_acceptor.hpp>
@@ -35,9 +34,9 @@ tcp_acceptor::tcp_acceptor(
     )
     : io_service_(ios)
     , strand_(s)
-    , acceptor_ipv4_(ios)
-    , acceptor_ipv6_(ios)
-    , transports_timer_(ios)
+    , acceptor_ipv4_(io_service_)
+    , acceptor_ipv6_(io_service_)
+    , transports_timer_(io_service_)
 {
     // ...
 }
@@ -166,7 +165,7 @@ bool tcp_acceptor::open(const std::uint16_t & port)
      * Start the tick timer.
      */
     do_tick(1);
-    
+
     return true;
 }
 
@@ -198,49 +197,59 @@ const boost::asio::ip::tcp::endpoint tcp_acceptor::local_endpoint() const
     ;
 }
 
-const std::vector< std::weak_ptr<tcp_transport> > &
-    tcp_acceptor::tcp_transports() const
-{
-    std::lock_guard<std::recursive_mutex> l(tcp_transports_mutex_);
-    
-    return m_tcp_transports;
-}
-
 void tcp_acceptor::do_ipv4_accept()
 {
     auto self(shared_from_this());
-    
-    auto t = std::make_shared<tcp_transport>(io_service_, strand_);
-    
-    std::lock_guard<std::recursive_mutex> l(tcp_transports_mutex_);
+
+    auto t = std::make_shared<tcp_transport> (io_service_, strand_, true);
     
     m_tcp_transports.push_back(t);
     
     acceptor_ipv4_.async_accept(t->socket(), strand_.wrap(
         [this, self, t](boost::system::error_code ec)
     {
-        if (ec)
+        if (acceptor_ipv4_.is_open() == true)
         {
-            // ...
-        }
-        else
-        {
-            try
+            if (ec)
             {
-                boost::asio::ip::tcp::endpoint remote_endpoint =
-                    t->socket().remote_endpoint()
-                ;
-                
-                log_debug("Accepting tcp connection from " << remote_endpoint);
-                
-                /**
-                 * Callback
-                 */
-                m_on_accept(t);
+                log_error(
+                    "TCP acceptor accept failed, message = " <<
+                    ec.message() << "."
+                );
             }
-            catch (std::exception & e)
+            else
             {
-                // ...
+                try
+                {
+                    boost::asio::ip::tcp::endpoint remote_endpoint =
+                        t->socket().remote_endpoint()
+                    ;
+
+                    /**
+                     * Callback
+                     */
+                    if (m_on_accept)
+                    {
+                        log_info(
+                            "Accepting tcp connection from " << remote_endpoint
+                        );
+                        
+                        m_on_accept(t);
+                    }
+                    else
+                    {
+                        log_info(
+                            "Dropping tcp connection from " <<
+                            remote_endpoint << " no handler set."
+                        );
+                    }
+                }
+                catch (std::exception & e)
+                {
+                    log_error(
+                        "TCP acceptor remote_endpoint, what = " << e.what()
+                    );
+                }
             }
             
             do_ipv4_accept();
@@ -251,38 +260,46 @@ void tcp_acceptor::do_ipv4_accept()
 void tcp_acceptor::do_ipv6_accept()
 {
     auto self(shared_from_this());
-    
-    auto t = std::make_shared<tcp_transport>(io_service_, strand_);
-    
-    std::lock_guard<std::recursive_mutex> l(tcp_transports_mutex_);
+
+    auto t = std::make_shared<tcp_transport> (io_service_, strand_, true);
     
     m_tcp_transports.push_back(t);
     
     acceptor_ipv6_.async_accept(t->socket(), strand_.wrap(
         [this, self, t](boost::system::error_code ec)
     {
-        if (ec)
+        if (acceptor_ipv6_.is_open() == true)
         {
-            // ...
-        }
-        else
-        {
-            try
+            if (ec)
             {
-                boost::asio::ip::tcp::endpoint remote_endpoint =
-                    t->socket().remote_endpoint()
-                ;
-                
-                log_debug("Accepting tcp connection from " << remote_endpoint);
-            
-                /**
-                 * Callback
-                 */
-                m_on_accept(t);
+                log_error(
+                    "TCP acceptor accept failed, message = " <<
+                    ec.message() << "."
+                );
             }
-            catch (std::exception & e)
+            else
             {
-                // ...
+                try
+                {
+                    boost::asio::ip::tcp::endpoint remote_endpoint =
+                        t->socket().remote_endpoint()
+                    ;
+                    
+                    log_debug(
+                        "Accepting tcp connection from " << remote_endpoint
+                    );
+                
+                    /**
+                     * Callback
+                     */
+                    m_on_accept(t);
+                }
+                catch (std::exception & e)
+                {
+                    log_error(
+                        "TCP acceptor remote_endpoint, what = " << e.what()
+                    );
+                }
             }
             
             do_ipv6_accept();
@@ -302,8 +319,6 @@ void tcp_acceptor::do_tick(const std::uint32_t & seconds)
         }
         else
         {
-            std::lock_guard<std::recursive_mutex> l(tcp_transports_mutex_);
-            
             auto it = m_tcp_transports.begin();
             
             while (it != m_tcp_transports.end())
@@ -321,4 +336,62 @@ void tcp_acceptor::do_tick(const std::uint32_t & seconds)
             do_tick(seconds);
         }
     }));
+}
+
+int tcp_acceptor::run_test(
+    boost::asio::io_service & ios, boost::asio::strand & s
+    )
+{
+    auto acceptor = std::make_shared<tcp_acceptor> (ios, s);
+    
+    acceptor->set_on_accept(
+        [] (std::shared_ptr<tcp_transport> transport)
+        {
+            transport->start();
+        }
+    );
+    
+    bool ret = false;
+    
+    try
+    {
+        std::uint16_t port = protocol::default_tcp_port;
+        
+        while (ret == false)
+        {
+            ret = acceptor->open(port);
+            
+            if (ret == false)
+            {
+                port += 2;
+            }
+            else
+            {
+                break;
+            }
+            
+            /**
+             * Try 50 even ports.
+             */
+            if (port > protocol::default_tcp_port + 100)
+            {
+                break;
+            }
+        }
+        
+        std::cout <<
+            "tcp_acceptor::run_test opened on port = " << port <<
+        std::endl;
+    }
+    catch (std::exception & e)
+    {
+        std::cerr << "what = " << e.what() << std::endl;
+    }
+    
+    if (ret == false)
+    {
+        std::cerr << "tcp_acceptor::run_test failed" << std::endl;
+    }
+
+    return 0;
 }

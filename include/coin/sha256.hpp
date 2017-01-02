@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -85,21 +85,24 @@ namespace coin {
         
             /**
              * init
+             * @param ctx The SHA256_CTX.
              */
-            void init();
+            void init(SHA256_CTX & ctx);
         
             /**
              * final
+             * @param ctx The SHA256_CTX.
              */
-            void final();
+            void final(SHA256_CTX & ctx);
 
             /**
              * update
+             * @param ctx The SHA256_CTX.
              * @param buf The buf.
              * @param len The length.
              */
             void update(
-                const std::uint8_t * buf, std::size_t len
+                SHA256_CTX & ctx, const std::uint8_t * buf, std::size_t len
             );
         
             /**
@@ -168,9 +171,7 @@ namespace coin {
             sha256 & operator = (const sha256 & b)
             {
                 std::memcpy(m_digest, b.digest(), sha256::digest_length);
-             
-                std::memcpy(&context_, &b.context_, sizeof(context_));
-                
+ 
                 return *this;
             }
     
@@ -341,6 +342,96 @@ namespace coin {
 
                 return *this;
             }
+
+            /**
+             * Operator ++
+             */
+            sha256 & operator ++ ()
+            {
+                int i = 0;
+                
+                while (
+                    ++m_digest[i] == 0 &&
+                    i < (digest_length / sizeof(std::uint32_t) - 1)
+                    )
+                {
+                    i++;
+                }
+                
+                return *this;
+            }
+
+            /**
+             * Operator ++
+             */
+            const sha256 operator ++ (int)
+            {
+                const sha256 ret = *this;
+                
+                ++(*this);
+                
+                return ret;
+            }
+        
+            /**
+             * operator -
+             */
+            const sha256 operator - () const
+            {
+                sha256 ret;
+                
+                auto ptr1 =
+                    reinterpret_cast<const std::uint32_t *>(m_digest)
+                ;
+                auto ptr2 =
+                    reinterpret_cast<std::uint32_t *>(ret.m_digest)
+                ;
+                
+                for (auto i = 0; i < digest_length / sizeof(std::uint32_t); i++)
+                {
+                    ptr2[i] = ~ptr1[i];
+                }
+
+                ret++;
+                
+                return ret;
+            }
+    
+            /**
+             * operator +=
+             */
+            sha256 & operator += (const sha256 & b)
+            {
+                std::uint64_t carry = 0;
+                
+                for (auto i = 0; i < digest_length / sizeof(std::uint32_t); i++)
+                {
+                    auto ptr1 =
+                        reinterpret_cast<std::uint32_t *>(m_digest)
+                    ;
+                    auto ptr2 =
+                        reinterpret_cast<const std::uint32_t *>(b.m_digest)
+                    ;
+                    
+                    std::uint64_t n = carry + ptr1[i] + ptr2[i];
+                    
+                    ptr1[i] = n & 0xffffffff;
+                    
+                    carry = n >> 32;
+                }
+
+                return *this;
+            }
+    
+            /**
+             * operator -=
+             */
+            sha256 & operator -= (const sha256 & b)
+            {
+                *this += -b;
+                
+                return *this;
+            }
         
             /**
              * operator ^
@@ -406,11 +497,13 @@ namespace coin {
 
         protected:
         
-            /**
-             * The context.
-             */
-            SHA256_CTX context_;
+            // ...
     };
+    
+    inline const sha256 operator - (const sha256 & a, const sha256 & b)
+    {
+        return sha256(a) -= b;
+    }
     
     inline const sha256 operator >> (const sha256 & a, unsigned int shift)
     {

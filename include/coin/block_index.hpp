@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -84,29 +84,33 @@ namespace coin {
              * Sets the previous block index.
              * @param val The value.
              */
-            void set_block_index_previous(
-                const std::shared_ptr<block_index> & val
-            );
+            void set_block_index_previous(block_index * val);
+        
+            /**
+             * Sets the next block index.
+             * @param val The value.
+             */
+            void set_block_index_next(block_index * val);
         
             /**
              * The previous block index.
              */
-            std::shared_ptr<block_index> & block_index_previous();
+            block_index * block_index_previous();
         
             /**
              * The previous block index.
              */
-            const std::shared_ptr<block_index> & block_index_previous() const;
+            const block_index * block_index_previous() const;
         
             /**
              * The next block index.
              */
-            std::shared_ptr<block_index> & block_index_next();
+            block_index * block_index_next();
         
             /**
              * The next block index.
              */
-            const std::shared_ptr<block_index> & block_index_next() const;
+            const block_index * block_index_next() const;
         
             /**
              * The file.
@@ -291,7 +295,7 @@ namespace coin {
             std::uint32_t get_stake_entropy_bit() const;
 
             /**
-             * IF true the stake modifier has been generated.
+             * If true the stake modifier has been generated.
              */
             bool generated_stake_modifier() const;
 
@@ -308,12 +312,12 @@ namespace coin {
             /**
              * The previous block index.
              */
-            std::shared_ptr<block_index> m_block_index_previous;
+            block_index * m_block_index_previous;
         
             /**
              * The next block index.
              */
-            std::shared_ptr<block_index> m_block_index_next;
+            block_index * m_block_index_next;
         
             /**
              * The file.

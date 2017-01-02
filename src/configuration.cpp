@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -26,17 +26,34 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
+#include <coin/android.hpp>
 #include <coin/configuration.hpp>
+#include <coin/db_env.hpp>
 #include <coin/filesystem.hpp>
 #include <coin/logger.hpp>
 #include <coin/network.hpp>
 #include <coin/protocol.hpp>
+#include <coin/zerotime.hpp>
+#include <coin/wallet.hpp>
 
 using namespace coin;
 
 configuration::configuration()
     : m_network_port_tcp(protocol::default_tcp_port)
     , m_network_tcp_inbound_maximum(network::tcp_inbound_maximum)
+    , m_network_udp_enable(true)
+    , m_wallet_transaction_history_maximum(wallet::configuration_interval_history)
+    , m_wallet_keypool_size(wallet::configuration_keypool_size)
+    , m_zerotime_depth(zerotime::depth)
+    , m_zerotime_answers_minimum(zerotime::answers_minimum)
+    , m_wallet_rescan(false)
+    , m_mining_proof_of_stake(true)
+    , m_blockchain_pruning(false)
+    , m_chainblender_debug_options(false)
+    , m_chainblender_use_common_output_denominations(true)
+    , m_database_cache_size(db_env::default_cache_size)
+    , m_wallet_deterministic(true)
+    , m_db_private(false)
 {
     // ...
 }
@@ -96,12 +113,182 @@ bool configuration::load()
         );
         
         /**
-         * Enforce the minimum network.tcp.inbound.maximum.
+         * Enforce the minimum network.tcp.inbound.minimum.
          */
         if (m_network_tcp_inbound_maximum < network::tcp_inbound_minimum)
         {
             m_network_tcp_inbound_maximum = network::tcp_inbound_minimum;
         }
+        
+        /**
+         * Get the network.udp.enable.
+         */
+        m_network_udp_enable = std::stoul(pt.get(
+            "network.udp.enable", std::to_string(false))
+        );
+        
+        log_debug(
+            "Configuration read network.udp.enable = " <<
+            m_network_udp_enable << "."
+        );
+        
+        /**
+         * Get the wallet.transaction.history.maximum.
+         */
+        m_wallet_transaction_history_maximum = std::stoul(pt.get(
+            "wallet.transaction.history.maximum",
+            std::to_string(m_wallet_transaction_history_maximum))
+        );
+        
+        log_debug(
+            "Configuration read wallet.transaction.history.maximum = " <<
+            m_wallet_transaction_history_maximum << "."
+        );
+        
+        /**
+         * Get the wallet.keypool.size.
+         */
+        m_wallet_keypool_size = std::stoi(pt.get(
+            "wallet.keypool.size",
+            std::to_string(m_wallet_keypool_size))
+        );
+        
+        log_debug(
+            "Configuration read wallet.keypool.size = " <<
+            m_wallet_keypool_size << "."
+        );
+
+        /**
+         * Get the zerotime.depth.
+         */
+        m_zerotime_depth = std::stoi(pt.get(
+            "zerotime.depth",
+            std::to_string(m_zerotime_depth))
+        );
+        
+        log_debug(
+            "Configuration read zerotime.depth = " <<
+            static_cast<std::uint32_t> (m_zerotime_depth) << "."
+        );
+        
+        /**
+         * Get the zerotime.answers.minimum.
+         */
+        m_zerotime_answers_minimum = std::stoi(pt.get(
+            "zerotime.answers.minimum",
+            std::to_string(m_zerotime_answers_minimum))
+        );
+        
+        /**
+         * Enforce the minimum zerotime.answers.minimum.
+         */
+        if (m_zerotime_answers_minimum > zerotime::answers_maximum)
+        {
+            m_zerotime_answers_minimum = zerotime::answers_maximum;
+        }
+        
+        log_debug(
+            "Configuration read zerotime.answers.minimum = " <<
+            static_cast<std::uint32_t> (m_zerotime_answers_minimum) << "."
+        );
+
+        /**
+         * Get the wallet.rescan.
+         */
+        m_wallet_rescan = std::stoi(pt.get(
+            "wallet.rescan",
+            std::to_string(m_wallet_rescan))
+        );
+        
+        log_debug(
+            "Configuration read wallet.rescan = " <<
+            m_wallet_rescan << "."
+        );
+        
+        /**
+         * Get the mining.proof-of-stake.
+         */
+        m_mining_proof_of_stake = std::stoi(pt.get(
+            "mining.proof-of-stake",
+            std::to_string(m_mining_proof_of_stake))
+        );
+        
+        log_debug(
+            "Configuration read mining.proof-of-stake = " <<
+            m_mining_proof_of_stake << "."
+        );
+
+        /**
+         * Get the chainblender.debug_options.
+         */
+        m_chainblender_debug_options = std::stoi(pt.get(
+            "chainblender.debug_options",
+            std::to_string(m_chainblender_debug_options))
+        );
+        
+        log_debug(
+            "Configuration read " << "chainblender.debug_options = " <<
+            m_chainblender_debug_options << "."
+        );
+        
+        /**
+         * Get the chainblender.use_common_output_denominations.
+         */
+        m_chainblender_use_common_output_denominations = std::stoi(pt.get(
+            "chainblender.use_common_output_denominations",
+            std::to_string(m_chainblender_use_common_output_denominations))
+        );
+        
+        log_debug(
+            "Configuration read " <<
+            "chainblender.use_common_output_denominations = " <<
+            m_chainblender_use_common_output_denominations << "."
+        );
+        
+        /**
+         * Get the database.cache_size.
+         */
+        m_database_cache_size = std::stoi(pt.get(
+            "database.cache_size",
+            std::to_string(m_database_cache_size))
+        );
+        
+        /**
+         * Make sure the database.cache_size stays within a range.
+         */
+        if (m_database_cache_size < 1 || m_database_cache_size > 2048)
+        {
+            m_database_cache_size = db_env::default_cache_size;
+        }
+        
+        log_debug(
+            "Configuration read database.cache_size = " <<
+            m_database_cache_size << "."
+        );
+        
+        /**
+         * Get the wallet.deterministic.
+         */
+        m_wallet_deterministic = std::stoi(pt.get(
+            "wallet.deterministic",
+            std::to_string(m_wallet_deterministic))
+        );
+        
+        log_debug(
+            "Configuration read wallet.deterministic = " <<
+            m_wallet_deterministic << "."
+        );
+        
+        /**
+         * Get the database.private.
+         */
+        m_db_private = std::stoi(pt.get(
+            "database.private", std::to_string(m_db_private))
+        );
+        
+        log_debug(
+            "Configuration read database.private = " << m_db_private << "."
+        );
     }
     catch (std::exception & e)
     {
@@ -144,6 +331,103 @@ bool configuration::save()
         pt.put(
             "network.tcp.inbound.maximum",
             std::to_string(m_network_tcp_inbound_maximum)
+        );
+        
+        /**
+         * Put the network.udp.enable into property tree.
+         */
+        pt.put(
+            "network.udp.enable", std::to_string(m_network_udp_enable)
+        );
+
+        /**
+         * Put the wallet.transaction.history.maximum into property tree.
+         */
+        pt.put(
+            "wallet.transaction.history.maximum",
+            std::to_string(m_wallet_transaction_history_maximum)
+        );
+        
+        /**
+         * Put the wallet.keypool.size into property tree.
+         */
+        pt.put(
+            "wallet.keypool.size", std::to_string(m_wallet_keypool_size)
+        );
+        
+        /**
+         * Put the zerotime.depth into property tree.
+         */
+        pt.put(
+            "zerotime.depth", std::to_string(m_zerotime_depth)
+        );
+        
+        /**
+         * Put the zerotime.answers.minimum into property tree.
+         */
+        pt.put(
+            "zerotime.answers.minimum",
+            std::to_string(m_zerotime_answers_minimum)
+        );
+        
+        /**
+         * Put the wallet.rescan into property tree.
+         */
+        pt.put(
+            "wallet.rescan", std::to_string(m_wallet_rescan)
+        );
+        
+        /**
+         * Put the mining.proof-of-stake into property tree.
+         */
+        pt.put(
+            "mining.proof-of-stake", std::to_string(m_mining_proof_of_stake)
+        );
+        
+        /**
+         * Put the chainblender.debug_options into property tree.
+         */
+        pt.put(
+            "chainblender.debug_options",
+            std::to_string(m_chainblender_debug_options)
+        );
+        
+        /**
+         * Put the chainblender.use_common_output_denominations into property
+         * tree.
+         */
+        pt.put(
+            "chainblender.use_common_output_denominations",
+            std::to_string(m_chainblender_use_common_output_denominations)
+        );
+        
+        /**
+         * Make sure the database.cache_size stays within a range.
+         */
+        if (m_database_cache_size < 1 || m_database_cache_size > 2048)
+        {
+            m_database_cache_size = db_env::default_cache_size;
+        }
+        
+        /**
+         * Put the database.cache_size into property tree.
+         */
+        pt.put(
+            "database.cache_size", std::to_string(m_database_cache_size)
+        );
+        
+        /**
+         * Put the wallet.deterministic into property tree.
+         */
+        pt.put(
+            "wallet.deterministic", std::to_string(m_wallet_deterministic)
+        );
+        
+        /**
+         * Put the database.private into property tree.
+         */
+        pt.put(
+            "database.private", std::to_string(m_db_private)
         );
         
         /**
@@ -218,4 +502,66 @@ void configuration::set_network_tcp_inbound_maximum(const std::size_t & val)
 const std::size_t & configuration::network_tcp_inbound_maximum() const
 {
     return m_network_tcp_inbound_maximum;
+}
+
+void configuration::set_network_udp_enable(const bool & val)
+{
+    m_network_udp_enable = val;
+}
+
+const bool & configuration::network_udp_enable() const
+{
+    return m_network_udp_enable;
+}
+
+void configuration::set_chainblender_debug_options(const bool & val)
+{
+    m_chainblender_debug_options = val;
+}
+
+const bool & configuration::chainblender_debug_options() const
+{
+    return m_chainblender_debug_options;
+}
+
+void configuration::set_chainblender_use_common_output_denominations(
+    const bool & val
+    )
+{
+    m_chainblender_use_common_output_denominations = val;
+}
+
+const bool & configuration::chainblender_use_common_output_denominations() const
+{
+    return m_chainblender_use_common_output_denominations;
+}
+
+void configuration::set_database_cache_size(const std::uint32_t & val)
+{
+    m_database_cache_size = val;
+}
+
+const std::uint32_t & configuration::database_cache_size() const
+{
+    return m_database_cache_size;
+}
+
+void configuration::set_wallet_deterministic(const bool & val)
+{
+    m_wallet_deterministic = val;
+}
+
+const bool & configuration::wallet_deterministic() const
+{
+    return m_wallet_deterministic;
+}
+
+void configuration::set_db_private(const bool & val)
+{
+    m_db_private = val;
+}
+
+const bool & configuration::db_private() const
+{
+    return m_db_private;
 }

@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -18,15 +18,25 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <iomanip>
+
 #include <coin/block.hpp>
 #include <coin/block_index.hpp>
+#include <coin/block_merkle.hpp>
 #include <coin/globals.hpp>
 #include <coin/hash.hpp>
+#include <coin/point_out.hpp>
 #include <coin/stack_impl.hpp>
 #include <coin/time.hpp>
+#include <coin/transaction_index.hpp>
+#include <coin/transaction_pool.hpp>
+#include <coin/transaction_position.hpp>
 #include <coin/utility.hpp>
 
 using namespace coin;
+
+#define FORK_HEIGHT_V023 74525
+#define FORK_HEIGHT_V020 50399
 
 utility::disk_info_t utility::disk_info(const std::string & path)
 {
@@ -51,6 +61,21 @@ utility::disk_info_t utility::disk_info(const std::string & path)
         ret.available =
             (static_cast<std::uintmax_t> (avail.HighPart) << 32) +
             avail.LowPart
+        ;
+    }
+#elif defined (__ANDROID__)
+    struct statfs vfs;
+
+    if (statfs(path.c_str(), &vfs) == 0)
+    {
+        ret.capacity =
+            static_cast<std::uintmax_t>(vfs.f_blocks) * vfs.f_frsize
+        ;
+        ret.free =
+            static_cast<std::uintmax_t>(vfs.f_bfree) * vfs.f_frsize
+        ;
+        ret.available =
+            static_cast<std::uintmax_t>(vfs.f_bavail) * vfs.f_frsize
         ;
     }
 #else
@@ -141,24 +166,63 @@ bool utility::is_initial_block_download()
     }
     
     static std::time_t g_last_update;
-    static std::shared_ptr<block_index> g_index_last_best;
+    static block_index * g_index_last_best = 0;
 
     if (stack_impl::get_block_index_best() != g_index_last_best)
     {
         g_index_last_best = stack_impl::get_block_index_best();
         g_last_update = std::time(0);
     }
-    
+
     return
         std::time(0) - g_last_update < 10 &&
         stack_impl::get_block_index_best()->time() <
-        std::time(0) - 24 * 60 * 60
+        std::time(0) - 1 * 60 * 60
+    ;
+}
+
+bool utility::is_spv_initial_block_download()
+{
+    if (
+        globals::instance().spv_block_last() == 0 ||
+        globals::instance().spv_best_block_height() <
+        checkpoints::instance().get_total_blocks_estimate()
+        )
+    {
+        return true;
+    }
+    
+    static std::time_t g_last_update;
+    static std::unique_ptr<block_merkle> g_block_merkle_last_best;
+
+    if (g_block_merkle_last_best == nullptr)
+    {
+        g_block_merkle_last_best.reset(
+            new block_merkle(*globals::instance().spv_block_last())
+        );
+        g_last_update = std::time(0);
+    }
+    else if (
+        globals::instance().spv_block_last()->get_hash() !=
+        g_block_merkle_last_best->get_hash()
+        )
+    {
+        g_block_merkle_last_best.reset(
+            new block_merkle(*globals::instance().spv_block_last())
+        );
+        g_last_update = std::time(0);
+    }
+
+    return
+        std::time(0) - g_last_update < 10 &&
+        globals::instance().spv_block_last()->block_header().timestamp <
+        std::time(0) - 1 * 60 * 60
     ;
 }
 
 bool utility::is_chain_file(const std::string & file_name)
 {
-    return file_name == "blkindex.dat";
+    return file_name == "block-index-peer.dat";
 }
 
 sha256 utility::get_orphan_root(const std::shared_ptr<block> & blk)
@@ -169,7 +233,7 @@ sha256 utility::get_orphan_root(const std::shared_ptr<block> & blk)
      * Work back to the first block in the orphan chain.
      */
     while (
-        globals::instance().orphan_blocks().count(
+        ptr && globals::instance().orphan_blocks().count(
         ptr->header().hash_previous_block) > 0
         )
     {
@@ -178,7 +242,7 @@ sha256 utility::get_orphan_root(const std::shared_ptr<block> & blk)
         ].get();
     }
     
-    return ptr->get_hash();
+    return ptr == 0 ? sha256() : ptr->get_hash();
 }
 
 sha256 utility::wanted_by_orphan(const std::shared_ptr<block> & blk)
@@ -189,7 +253,7 @@ sha256 utility::wanted_by_orphan(const std::shared_ptr<block> & blk)
      * Work back to the first block in the orphan chain.
      */
     while (
-        globals::instance().orphan_blocks().count(
+        ptr && globals::instance().orphan_blocks().count(
         ptr->header().hash_previous_block) > 0
         )
     {
@@ -198,7 +262,7 @@ sha256 utility::wanted_by_orphan(const std::shared_ptr<block> & blk)
         ].get();
     }
     
-    return ptr->header().hash_previous_block;
+    return ptr == 0 ? sha256() : ptr->header().hash_previous_block;
 }
 
 bool utility::add_orphan_tx(const data_buffer & buffer)
@@ -337,8 +401,8 @@ std::uint32_t utility::limit_orphan_tx_size(const std::uint32_t & max_orphans)
     return evicted;
 }
 
-const std::shared_ptr<block_index> utility::get_last_block_index(
-    const std::shared_ptr<block_index> & index, const bool & is_pos
+const block_index * utility::get_last_block_index(
+    const block_index * index, const bool & is_pos
     )
 {
     auto tmp = index;
@@ -352,6 +416,48 @@ const std::shared_ptr<block_index> utility::get_last_block_index(
     }
     
     return tmp;
+}
+
+block_index * utility::find_block_index_by_height(
+    const std::uint32_t & height
+    )
+{
+    block_index * ret = 0;
+    
+    if (height < stack_impl::get_block_index_best()->height() / 2)
+    {
+        ret = stack_impl::get_block_index_genesis();
+    }
+    else
+    {
+        ret = stack_impl::get_block_index_best();
+    }
+    
+    if (
+        globals::instance().block_index_fbbh_last() &&
+        std::abs(static_cast<std::int64_t> (height - ret->height())) >
+        std::abs(static_cast<std::int64_t> (height - globals::instance(
+        ).block_index_fbbh_last()->height()))
+        )
+    {
+        ret = const_cast<block_index *> (
+            globals::instance().block_index_fbbh_last()
+        );
+    }
+    
+    while (ret->height() > height)
+    {
+        ret = ret->block_index_previous();
+    }
+    
+    while (ret->height() < height)
+    {
+        ret = ret->block_index_next();
+    }
+    
+    globals::instance().set_block_index_fbbh_last(ret);
+    
+    return ret;
 }
 
 std::uint32_t utility::compute_max_bits(
@@ -398,16 +504,21 @@ std::uint32_t utility::compute_min_stake(
     return compute_max_bits(constants::proof_of_stake_limit, base, time);
 }
 
+std::uint32_t utility::get_target_spacing(
+    const block_index * index_last
+    )
+{
+    return constants::work_and_stake_target_spacing;
+}
+
 std::uint32_t utility::get_next_target_required(
-    const std::shared_ptr<block_index> & index_last, const bool & is_pos
+    const block_index * index_last, const bool & is_pos
     )
 {
     /**
      * The next block height.
      */
     auto height = index_last->height() + 1;
-    
-    (void)height;
     
     big_number bn_new;
     
@@ -461,227 +572,458 @@ std::uint32_t utility::get_next_target_required(
         return bn_new.get_compact();
     }
     
-    /**
-     * DigiShield-like retarget.
-     */
-    std::int64_t blocks_to_go_back = 0;
-    
-    std::int64_t target_timespan_re = 0;
-    std::int64_t target_spacing_re = 0;
-
-    /**
-     * constants::work_and_stake_target_spacing
-     */
-    target_timespan_re = constants::work_and_stake_target_spacing;
-    
-    /**
-     * constants::work_and_stake_target_spacing
-     */
-    target_spacing_re = constants::work_and_stake_target_spacing;
-
-    /**
-     * 1 block
-     */
-    static const std::int64_t interval_re =
-        target_timespan_re / target_spacing_re
-    ;
-    
-    std::int64_t retarget_timespan = target_timespan_re;
-    std::int64_t retarget_interval = interval_re;
-
-    /**
-     * Only change once per interval.
-     */
-    if ((index_last->height() + 1) % retarget_interval != 0)
+    if (constants::test_net == true)
     {
-        return index_last->bits();
+        return get_next_target_required_v023(index_last, is_pos);
     }
-
-    /**
-     * Go back the full period unless it's the first retarget after genesis.
-     */
-    blocks_to_go_back = retarget_interval - 1;
-
-    if ((index_last->height() + 1) != retarget_interval)
-    {
-        blocks_to_go_back = retarget_interval;
-    }
-    
-    /**
-     * Go back by what we want to be N days worth of blocks.
-     */
-    const auto * index_first = index_last.get();
-    
-    for (auto i = 0; index_first && i < blocks_to_go_back; i++)
-    {
-        index_first = index_first->block_index_previous().get();
-    }
-    
-    assert(index_first);
-
-    /**
-     * Limit adjustment step.
-     */
-    std::int64_t actual_timespan = index_last->time() - index_first->time();
-    
-    if (globals::instance().debug())
-    {
-        log_debug(
-            "Utility, get next target required, actual_timespan = " <<
-            actual_timespan << " before bounds."
-        );
-    }
-    
-    if (globals::instance().debug())
-    {
-        log_debug(
-            "Utility, get next target required, actual_timespan " <<
-            "limiting: " << (retarget_timespan - (retarget_timespan / 4)) <<
-            ":" << (retarget_timespan + (retarget_timespan / 2)) << "."
-        );
-    }
-
-    if (actual_timespan < (retarget_timespan - (retarget_timespan / 4)))
-    {
-        actual_timespan = (retarget_timespan - (retarget_timespan / 4));
-    }
-    
-    if (actual_timespan > (retarget_timespan + (retarget_timespan / 2)))
-    {
-        actual_timespan = (retarget_timespan + (retarget_timespan / 2));
-    }
-    
-    if (globals::instance().debug())
-    {
-        log_debug(
-            "Utility, get next target required, corrected "
-            "actual_timespan = " << actual_timespan << " before bounds."
-        );
-    }
-    
-    bn_new.set_compact(index_last->bits());
-    
-    bn_new *= actual_timespan;
-    bn_new /= retarget_timespan;
-
-    if (bn_new > target_limit)
-    {
-        bn_new = target_limit;
-    }
-    
-    /**
-     * This implements part of the fair solo-mining fixed range difficulty
-     * algorithm. Elsewhere we reject blocks that exceed the ceiling via
-     * global network conensus. This forces all types of CPU's, GPU's, etc
-     * to operate within the fixed target range without being able to
-     * over-power one another (they both have a fair chance at solving 
-     * Proof-of-Work blocks). Proof-of-Stake will drive the difficulty up
-     * causing periodic times where few Proof-of-Work blocks will be solved. As
-     * the difficulty drops Proof-of-Work block generation will start up again.
-     * This results in a variable block generation time where money supply 
-     * will be very slow for some time and then speed up for some time.
-     * Because of this you cannot predict when you will have a chance to solve
-     * a Proof-of-Work block. When pooled mining is supported via RPC the
-     * block timing will remain at the fixed constant which is specified as
-     * 200 seconds.
-     */
-    if (is_pos == false)
+    else
     {
         /**
-         * If we have reached the minimum difficulty raise it. If we have
-         * breached the ceiling lower the difficulty.
+         * These MUST always be top down.
          */
-        if (bn_new >= constants::proof_of_work_limit)
+        
+        /**
+         * The block height at which version 0.2.3 retargeting begins.
+         */
+        enum { block_height_v023_retargeting = FORK_HEIGHT_V023 };
+        
+        /**
+         * The block height at which version 0.2.0 retargeting begins.
+         */
+        enum { block_height_v020_retargeting = FORK_HEIGHT_V020 };
+
+        /**
+         * Check for version retargeting.
+         */
+        if (height > block_height_v023_retargeting)
         {
-            /**
-             * Raise the difficulty to 0.00388934.
-             */
-            bn_new.set_compact(503382300);
+            return get_next_target_required_v023(index_last, is_pos);
         }
-        else if (bn_new < constants::proof_of_work_limit_ceiling)
+        else if (height > block_height_v020_retargeting)
         {
-            /**
-             * Lower the difficulty to 0.00388934.
-             */
-            bn_new.set_compact(503382300);
+            return get_next_target_required_v020(index_last, is_pos);
         }
-        else
+        
+        /**
+         * Version 0.1 retargeting.
+         */
+
+        /**
+         * DigiShield-like retarget.
+         */
+        std::int64_t blocks_to_go_back = 0;
+        
+        /**
+         * We alter the block time so that coins will be generated at the same
+         * rate while using the fair solo-mining algorithm.
+         */
+
+        std::int64_t target_timespan_re = 0;
+        std::int64_t target_spacing_re = 0;
+
+        /**
+         * constants::work_and_stake_target_spacing
+         */
+        target_timespan_re = constants::work_and_stake_target_spacing;
+        
+        /**
+         * constants::work_and_stake_target_spacing
+         */
+        target_spacing_re = constants::work_and_stake_target_spacing;
+
+        /**
+         * 1 block
+         */
+        static const std::int64_t interval_re =
+            target_timespan_re / target_spacing_re
+        ;
+        
+        std::int64_t retarget_timespan = target_timespan_re;
+        std::int64_t retarget_interval = interval_re;
+
+        /**
+         * Only change once per interval.
+         */
+        if ((index_last->height() + 1) % retarget_interval != 0)
+        {
+            return index_last->bits();
+        }
+
+        /**
+         * Go back the full period unless it's the first retarget after genesis.
+         */
+        blocks_to_go_back = retarget_interval - 1;
+
+        if ((index_last->height() + 1) != retarget_interval)
+        {
+            blocks_to_go_back = retarget_interval;
+        }
+        
+        /**
+         * Go back by what we want to be N days worth of blocks.
+         */
+        const auto * index_first = index_last;
+        
+        for (auto i = 0; index_first && i < blocks_to_go_back; i++)
+        {
+            index_first = index_first->block_index_previous();
+        }
+        
+        assert(index_first);
+
+        /**
+         * Limit adjustment step.
+         */
+        std::int64_t actual_timespan = index_last->time() - index_first->time();
+        
+        if (globals::instance().debug() && false)
+        {
+            log_debug(
+                "Utility, get next target required, actual_timespan = " <<
+                actual_timespan << " before bounds."
+            );
+        }
+        
+        if (globals::instance().debug() && false)
+        {
+            log_debug(
+                "Utility, get next target required, actual_timespan " <<
+                "limiting: " << (retarget_timespan - (retarget_timespan / 4)) <<
+                ":" << (retarget_timespan + (retarget_timespan / 2)) << "."
+            );
+        }
+
+        if (actual_timespan < (retarget_timespan - (retarget_timespan / 4)))
+        {
+            actual_timespan = (retarget_timespan - (retarget_timespan / 4));
+        }
+        
+        if (actual_timespan > (retarget_timespan + (retarget_timespan / 2)))
+        {
+            actual_timespan = (retarget_timespan + (retarget_timespan / 2));
+        }
+        
+        if (globals::instance().debug() && false)
+        {
+            log_debug(
+                "Utility, get next target required, corrected "
+                "actual_timespan = " << actual_timespan << " before bounds."
+            );
+        }
+        
+        bn_new.set_compact(index_last->bits());
+        
+        bn_new *= actual_timespan;
+        bn_new /= retarget_timespan;
+
+        if (bn_new > target_limit)
+        {
+            bn_new = target_limit;
+        }
+
+        /**
+         * Only perform this for blocks less than N after fair solo-mining.
+         */
+        if (height < 43200)
         {
             /**
-             * The f difficulty.
+             * This implements part of the fair solo-mining fixed range difficulty
+             * algorithm. Elsewhere we reject blocks that exceed the ceiling.
              */
-            std::int32_t f = 0;
-            
-            /**
-             * Gets the one's digit.
-             */
-            auto ones_digit = index_last->height() % 10;
-            
-            switch (ones_digit)
+            if (is_pos == false)
             {
-                case 0:
+                /**
+                 * If we have reached the minimum difficulty raise it. If we have
+                 * breached the ceiling lower the difficulty.
+                 */
+                if (bn_new >= constants::proof_of_work_limit)
                 {
-                    f = 100;
+                    /**
+                     * Raise the difficulty to 0.00388934.
+                     */
+                    bn_new.set_compact(503382300);
                 }
-                break;
-                case 1:
+                else if (bn_new < constants::proof_of_work_limit_ceiling)
                 {
-                    f = -100;
+                    /**
+                     * Lower the difficulty to 0.00388934.
+                     */
+                    bn_new.set_compact(503382300);
                 }
-                break;
-                case 2:
+                else
                 {
-                    f = 105;
+                    /**
+                     * The flip difficulty.
+                     */
+                    std::int32_t f = 0;
+                    
+                    /**
+                     * Gets the one's digit.
+                     */
+                    auto ones_digit = index_last->height() % 10;
+                    
+                    switch (ones_digit)
+                    {
+                        case 0:
+                        {
+                            f = 100;
+                        }
+                        break;
+                        case 1:
+                        {
+                            f = -100;
+                        }
+                        break;
+                        case 2:
+                        {
+                            f = 105;
+                        }
+                        break;
+                        case 3:
+                        {
+                            f = -105;
+                        }
+                        break;
+                        case 4:
+                        {
+                            f = 110;
+                        }
+                        break;
+                        case 5:
+                        {
+                            f = -110;
+                        }
+                        break;
+                        case 6:
+                        {
+                            f = 115;
+                        }
+                        break;
+                        case 7:
+                        {
+                            f = -115;
+                        }
+                        break;
+                        case 8:
+                        {
+                            f = 120;
+                        }
+                        break;
+                        case 9:
+                        {
+                            f = -120;
+                        }
+                        break;
+                        default:
+                        {
+                            f = 0;
+                        }
+                        break;
+                    }
+                    
+                    /**
+                     * Set the flipped difficulty.
+                     */
+                    bn_new.set_compact(bn_new.get_compact() + f);
                 }
-                break;
-                case 3:
-                {
-                    f = -105;
-                }
-                break;
-                case 4:
-                {
-                    f = 110;
-                }
-                break;
-                case 5:
-                {
-                    f = -110;
-                }
-                break;
-                case 6:
-                {
-                    f = 115;
-                }
-                break;
-                case 7:
-                {
-                    f = -115;
-                }
-                break;
-                case 8:
-                {
-                    f = 120;
-                }
-                break;
-                case 9:
-                {
-                    f = -120;
-                }
-                break;
-                default:
-                {
-                    f = 0;
-                }
-                break;
             }
-            
-            /**
-             * Set the f difficulty.
-             */
-            bn_new.set_compact(bn_new.get_compact() + f);
         }
     }
-
+    
     return bn_new.get_compact();
+}
+
+std::uint32_t utility::get_next_target_required_v020(
+    const block_index * index_last, const bool & is_pos
+    )
+{
+    big_number ret;
+    
+    /**
+     * Get the target limit.
+     */
+    big_number target_limit =
+        is_pos ? constants::proof_of_stake_limit :
+        constants::proof_of_work_limit
+    ;
+    
+    /**
+     * get the index of the previous index.
+     */
+    auto index_previous = get_last_block_index(index_last, is_pos);
+
+    assert(index_previous);
+    
+    /**
+     * Get the index of the previous index's index.
+     */
+    auto index_previous_previous =
+        get_last_block_index(index_previous->block_index_previous(), is_pos
+    );
+    
+    assert(index_previous_previous);
+
+    /**
+     * Calculate the actual spacing.
+     */
+    std::int64_t
+        actual_spacing = index_previous->time() -
+        index_previous_previous->time()
+    ;
+
+    /**
+     * One week.
+     */
+    static const std::int64_t target_timespan = 7 * 24 * 60 * 60;
+    
+    /**
+     * Two hours.
+     */
+    static const std::int64_t
+        target_spacing_work_max =
+        12 * (constants::work_and_stake_target_spacing * 3)
+    ;
+    
+    /**
+     * Spacing
+     */
+    std::int64_t target_spacing =
+        is_pos ? constants::work_and_stake_target_spacing :
+        std::min(target_spacing_work_max,
+        static_cast<std::int64_t> (constants::work_and_stake_target_spacing *
+        (1 + index_last->height() - index_previous->height())))
+    ;
+
+    /**
+     * Set the bits.
+     */
+    ret.set_compact(index_previous->bits());
+    
+    /**
+     * Retarget
+     */
+    ret *=
+        ((target_timespan / target_spacing - 1) *
+        target_spacing + actual_spacing + actual_spacing)
+    ;
+    ret /=
+        ((target_timespan / target_spacing + 1) * target_spacing)
+    ;
+
+    if (ret > target_limit)
+    {
+        ret = target_limit;
+    }
+
+    return ret.get_compact();
+}
+
+std::uint32_t utility::get_next_target_required_v023(
+    const block_index * index_last, const bool & is_pos
+    )
+{
+    big_number ret;
+    
+    /**
+     * Get the target limit.
+     */
+    big_number target_limit =
+        is_pos ? constants::proof_of_stake_limit :
+        constants::proof_of_work_limit
+    ;
+    
+    /**
+     * Get the index of the previous index.
+     */
+    auto index_previous = get_last_block_index(index_last, is_pos);
+
+    assert(index_previous);
+    
+    /**
+     * Get the index of the previous index's index.
+     */
+    auto index_previous_previous =
+        get_last_block_index(index_previous->block_index_previous(), is_pos
+    );
+    
+    assert(index_previous_previous);
+
+    /**
+     * 20 minutes.
+     */
+    static const std::int64_t target_timespan = 20 * 60;
+    
+    /**
+     * Spacing
+     */
+    std::int64_t target_spacing = constants::work_and_stake_target_spacing;
+
+    /**
+     * Set the bits.
+     */
+    ret.set_compact(index_previous->bits());
+    
+    /**
+     * Calculate the actual spacing.
+     */
+    std::int64_t
+        actual_spacing = index_previous->time() -
+        index_previous_previous->time()
+    ;
+
+    if (actual_spacing < 0)
+    {
+        actual_spacing = constants::work_and_stake_target_spacing;
+    }
+    
+    /**
+     * Retarget
+     */
+    ret *=
+        (((target_timespan / target_spacing) - 1) *
+        target_spacing + actual_spacing + actual_spacing)
+    ;
+    ret /=
+        (((target_timespan / target_spacing) + 1) * target_spacing)
+    ;
+
+    if (ret > target_limit)
+    {
+        ret = target_limit;
+    }
+
+    return ret.get_compact();
+}
+
+bool utility::get_transaction(
+    const sha256 & hash_tx, transaction & tx, sha256 & hash_block_out
+    )
+{
+    if (transaction_pool::instance().exists(hash_tx))
+    {
+        tx = transaction_pool::instance().lookup(hash_tx);
+        
+        return true;
+    }
+    
+    db_tx tx_db("r");
+    
+    transaction_index index;
+    
+    if (tx.read_from_disk(tx_db, point_out(hash_tx, 0), index))
+    {
+        block blk;
+        
+        if (
+            blk.read_from_disk(index.get_transaction_position().file_index(),
+            index.get_transaction_position().block_position(), false)
+            )
+        {
+            hash_block_out = blk.get_hash();
+        }
+        
+        return true;
+    }
+    
+    return false;
 }

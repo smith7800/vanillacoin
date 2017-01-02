@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -22,7 +22,7 @@
 #define COIN_UPNP_CLIENT_HPP
 
 #if (defined _MSC_VER)
-#define USE_UPNP 1
+#define USE_UPNP 0
 #define _WIN32 1
 #define STATICLIB 1
 #endif // _MSC_VER

@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -22,13 +22,17 @@
 #define COIN_WALLET_HPP
 
 #include <cstdint>
+#include <deque>
 #include <list>
 #include <map>
 #include <mutex>
 #include <set>
 
+#include <coin/address.hpp>
 #include <coin/destination.hpp>
 #include <coin/db_wallet.hpp>
+#include <coin/hd_configuration.hpp>
+#include <coin/hd_keychain.hpp>
 #include <coin/key_public.hpp>
 #include <coin/key_store_crypto.hpp>
 #include <coin/key_wallet_master.hpp>
@@ -42,6 +46,7 @@
 
 namespace coin {
 
+    class account;
     class accounting_entry;
     class block_locator;
     class coin_control;
@@ -77,7 +82,23 @@ namespace coin {
                 feature_comprpubkey = 60000,
                 feature_latest = 60000
             } feature_t;
+        
+            /**
+             * We do not inform the status_manager of transactions older than
+             * this many days expressed in seconds.
+             */
+            enum { configuration_interval_history = 86400 * 365 };
 
+            /**
+             * The configuration (default) keypool size.
+             */
+            enum { configuration_keypool_size = 100 };
+        
+            /**
+             * Constructor
+             */
+            wallet();
+        
             /**
              * Constructor
              * @param impl The stack_impl.
@@ -100,10 +121,26 @@ namespace coin {
             void flush();
         
             /**
+             * Encrypts the wallet.
+             * @param passphrase The passphrase.
+             */
+            bool encrypt(const std::string & passphrase);
+        
+            /**
              * Unlocks the wallet.
              * @param passphrase The passphrase.
              */
             bool unlock(const std::string & passphrase);
+        
+            /**
+             * Changes the passphrase.
+             * @param passphrase_old The old passphrase.
+             * @param passphrase_new The new passphrase.
+             */
+            bool change_passphrase(
+                const std::string & passphrase_old,
+                const std::string & passphrase_new
+            );
         
             /**
              * Check whether we are allowed to upgrade (or already support) to
@@ -187,6 +224,11 @@ namespace coin {
             void reserve_key_from_key_pool(
                 std::int64_t & index, key_pool & keypool
             );
+        
+            /**
+             * Gets the reserve keys.
+             */
+            std::set<types::id_key_t> reserve_keys();
         
             /**
              * Removes a key from the key_pool.
@@ -282,6 +324,15 @@ namespace coin {
             void on_transaction_updated(const sha256 & val);
 
             /**
+             * Called when a transaction has been updated.
+             * @param height The height of the block the transaction is in.
+             * @param val The sha256.
+             */
+            void on_spv_transaction_updated(
+                const std::int32_t & height, const sha256 & hash_tx
+            );
+        
+            /**
              * Called when inventory has changed.
              * @param val The sha256.
              */
@@ -292,7 +343,24 @@ namespace coin {
              * @param val The sha256.
              */
             bool erase_from_wallet(const sha256 & val) const;
-
+        
+            /**
+             * Erases all transactions.
+             */
+            void erase_transactions();
+        
+            /**
+             * Performs a ZeroTime lock on the transaction.
+             * @param val The sha256.
+             */
+            void zerotime_lock(const sha256 & val);
+        
+            /**
+             * Performs a chain blender denominate operation using the value.
+             * @param val The value.
+             */
+            bool chainblender_denominate(const std::int64_t & val);
+        
             /**
              * Scans the wallet for transactions belonging to us.
              * @param index_start The block_index.
@@ -300,7 +368,7 @@ namespace coin {
              * updated.
              */
             std::int32_t scan_for_transactions(
-                const std::shared_ptr<block_index> & index_start,
+                const block_index * index_start,
                 const bool & update = false
             );
         
@@ -359,6 +427,11 @@ namespace coin {
             bool add_to_wallet(const transaction_wallet & wtx_in);
         
             /**
+             * Marks all transactions as dirty.
+             */
+            void mark_dirty();
+        
+            /**
              * Sets the address book name.
              * @param addr The destination::tx_t.
              * @param name The name.
@@ -402,6 +475,11 @@ namespace coin {
             const std::uint32_t & master_key_max_id() const;
         
             /**
+             * If true the wallet is file backed.
+             */
+            const bool & is_file_backed() const;
+        
+            /**
              * Set the minimim allowed version.
              */
             bool set_min_version(
@@ -424,6 +502,26 @@ namespace coin {
              * Gets the balance.
              */
             std::int64_t get_balance() const;
+        
+            /**
+             * Gets the (on-chain) balance.
+             */
+            std::int64_t get_on_chain_balance() const;
+        
+            /**
+             * Gets the (on-chain + non-denominated) balance.
+             */
+            std::int64_t get_on_chain_nondenominated_balance() const;
+        
+            /**
+             * Gets the (on-chain + denominated) balance.
+             */
+            std::int64_t get_on_chain_denominated_balance() const;
+        
+            /**
+             * Gets the (on-chain + blended) balance.
+             */
+            std::int64_t get_on_chain_blended_balance() const;
         
             /**
              * Gets the unconfirmed balance.
@@ -451,14 +549,25 @@ namespace coin {
              * @param spend_time The spend time.
              * @param coins_out The coins out.
              * @param value_out The value out.
+             * @param filter The filter (inputs with matching values will be
+             * excluded from output).
              * @param control The coin_control.
+             * @param use_zerotime If true ZeroTime will be used.
+             * @param use_chainblended If true chainblended transactions will
+             * be used.
+             * @param use_only_chainblended If true only chainblended inputs
+             * will be used.
              */
             bool select_coins(
                 const std::int64_t & target_value,
                 const std::uint32_t & spend_time,
                 std::set< std::pair<transaction_wallet,
                 std::uint32_t> > & coins_out, std::int64_t & value_out,
-                const std::shared_ptr<coin_control> & control = 0
+                const std::set<std::int64_t> & filter,
+                const std::shared_ptr<coin_control> & control,
+                const bool & use_zerotime = false,
+                const bool & use_chainblended = true,
+                const bool & use_only_chainblended = false
             ) const;
 
             /**
@@ -467,13 +576,23 @@ namespace coin {
              * @param tx_new The transaction_wallet.
              * @param reserved_key The key_reserved.
              * @param fee_out The fee.
+             * @param filter The filter (inputs with matching values will be
+             * excluded from the transaction).
              * @param control The coin_control.
+             * @param use_zerotime If true ZeroTime will be used.
+             * @param use_chainblended If true chainblended transactions will
+             * be used.
+             * @param use_only_chainblended If true only chainblended inputs
+             * will be used.
              */
             bool create_transaction(
                 const std::vector< std::pair<script, std::int64_t> > & scripts,
                 transaction_wallet & tx_new, key_reserved & reserved_key,
                 std::int64_t & fee_out,
-                const std::shared_ptr<coin_control> & control = 0
+                const std::set<std::int64_t> & filter,
+                const std::shared_ptr<coin_control> & control,
+                const bool & use_zerotime, const bool & use_chainblended = true,
+                const bool & use_only_chainblended = false
             );
       
             /**
@@ -483,22 +602,43 @@ namespace coin {
              * @param tx_new The transaction_wallet.
              * @param reserved_key The key_reserved.
              * @param fee_out The fee (out).
+             * @param filter The filter (inputs with matching values will be
+             * excluded from the transaction).
              * @param control The coin_control.
+             * @param use_zerotime If true ZeroTime will be used.
+             * @param use_chainblended If true chainblended transactions will
+             * be used.
+             * @param use_only_chainblended If true only chainblended inputs
+             * will be used.
              */
             bool create_transaction(
                 const script & script_pub_key, const std::int64_t & value,
                 transaction_wallet & tx_new, key_reserved & reserved_key,
                 std::int64_t & fee_out,
-                const std::shared_ptr<coin_control> & control = 0
+                const std::set<std::int64_t> & filter,
+                const std::shared_ptr<coin_control> & control,
+                const bool & use_zerotime, const bool & use_chainblended = true,
+                const bool & use_only_chainblended = false
+            );
+        
+            /**
+             * Gets a transaction given hash.
+             * @param hash_tx The hash of the transaction.
+             * @param wtx_out The transaction_wallet (out)
+             */
+            bool get_transaction(
+                const sha256 & hash_tx, transaction_wallet & wtx_out
             );
         
             /**
              * Commits a transaction.
              * @param wtx_new The transaction_wallet.
              * @param reserve_key The key_reserved.
+             * @param use_zerotime If true ZeroTime will be used.
              */
-            bool commit_transaction(
-                transaction_wallet & wtx_new, key_reserved & reserve_key
+            std::pair<bool, std::string> commit_transaction(
+                transaction_wallet & wtx_new, key_reserved & reserve_key,
+                const bool & use_zerotime
             );
         
             /**
@@ -518,10 +658,14 @@ namespace coin {
              * @param script_pub_key The script public key.
              * @param value The value.
              * @param wtx_new The new transaction_wallet.
+             * @param use_zerotime If true ZeroTime will be used.
+             * @param use_only_chainblended If true only chainblended inputs
+             * will be used.
              */
-            bool send_money(
+            std::pair<bool, std::string> send_money(
                 const script & script_pub_key, const std::int64_t & value,
-                const transaction_wallet & wtx_new
+                const transaction_wallet & wtx_new, const bool & use_zerotime,
+                const bool & use_only_chainblended
             );
         
             /**
@@ -529,10 +673,14 @@ namespace coin {
              * @param address The destination::tx_t.
              * @param value The value.
              * @param wtx_new The new transaction_wallet.
+             * @param use_zerotime If true ZeroTime will be used.
+             * @param use_only_chainblended If true only chainblended inputs
+             * will be used.
              */
-            bool send_money_to_destination(
+            std::pair<bool, std::string> send_money_to_destination(
                 const destination::tx_t & address, const std::int64_t & value,
-                const transaction_wallet & wtx_new
+                const transaction_wallet & wtx_new, const bool & use_zerotime,
+                const bool & use_only_chainblended
             );
         
             /**
@@ -540,11 +688,21 @@ namespace coin {
              * @param coins The output's.
              * @param only_confirmed If true only confirmed outputs will
              * be returned.
+             * @param filter The filter (inputs with matching values will be
+             * excluded from outputs).
              * @param control The coin_control.
+             * @param use_zerotime If true ZeroTime will be used.
+             * @param use_chainblended If true chainblended transactions will
+             * be used.
+             * @param use_only_chainblended If true only chainblended
+             * transactions will be used.
              */
             void available_coins(
                 std::vector<output> & coins, const bool & only_confirmed,
-                const std::shared_ptr<coin_control> & control
+                const std::set<std::int64_t> & filter,
+                const std::shared_ptr<coin_control> & control,
+                const bool & use_zerotime, const bool & use_chainblended = true,
+                const bool & use_only_chainblended = false
             ) const;
 
             /**
@@ -583,6 +741,11 @@ namespace coin {
             );
         
             /**
+             * The stack_impl.
+             */
+            const stack_impl * get_stack_impl() const;
+        
+            /**
              * The transactions.
              */
             std::map<sha256, transaction_wallet> & transactions();
@@ -617,6 +780,50 @@ namespace coin {
              * The next order position.
              */
             const std::int64_t & order_position_next() const;
+        
+            /**
+             * Sets the timestamp.
+             * @param val The value.
+             */
+            void set_timestamp(const std::time_t & val);
+        
+            /**
+             * The timestamp.
+             */
+            const std::time_t & timestamp() const;
+
+            /**
+             * Sets the HD key master.
+             * @param k The key.
+             * @param do_add_key If true the key will be added to the wallet.
+             * @param write_to_database If true it is written to the database.
+             */
+            bool set_hd_key_master(
+                const key & k,
+                const bool & do_add_key = true,
+                const bool & write_to_database = true
+            );
+        
+            /**
+             * The hd_configuration.
+             */
+            const hd_configuration & get_hd_configuration() const;
+        
+            /**
+             * Sets the hd_configuration.
+             * @param hd_config The hd_configuration.
+             * @param write_to_database If true the hd_configuration will be
+             * written to the database.
+             */
+            bool set_hd_configuration(
+                const hd_configuration & hd_config,
+                const bool & write_to_database
+            );
+        
+            /**
+             * Gets the hd_keychain seed.
+             */
+            std::string hd_keychain_seed();
         
             /** 
              * Reads an order position.
@@ -659,13 +866,21 @@ namespace coin {
                 const std::size_t & minimum_depth
             );
         
-        private:
-
             /**
-             * Checks the wallet integrity and performs repairs if necessary.
-             * @param ec The boost::system::error_code.
+             * Gets an account address.
+             * @param name The name of the account.
+             * @param addr_out The address (out).
              */
-            void check_tick(const boost::system::error_code & ec);
+            static std::pair<bool, std::string> get_account_address(
+                wallet & w, const std::string & name, address & addr_out
+            );
+        
+            /**
+             * Prints.
+             */
+            void print();
+        
+        private:
         
             /**
              * Resends any transactions that have not yet made it into a block.
@@ -674,11 +889,21 @@ namespace coin {
             void resend_transactions_tick(const boost::system::error_code & ec);
         
             /**
+             * Processes the zerotime lock queue.
+             * @param ec The boost::system::error_code.
+             */
+            void zerotime_lock_queue_tick(const boost::system::error_code & ec);
+        
+            /**
              * Encrypts the wallet.
              * @param passphrase The passphrase.
-             * @note You MUST restart the process after calling this function.
              */
             bool do_encrypt(const std::string & passphrase);
+        
+            /**
+             * The stack_impl.
+             */
+            stack_impl * m_stack_impl;
         
             /**
              * The database wallet encryption.
@@ -718,6 +943,21 @@ namespace coin {
             mutable std::int64_t m_order_position_next;
         
             /**
+             * The timestamp.
+             */
+            std::time_t m_timestamp;
+        
+            /**
+             * The hd_configuration.
+             */
+            hd_configuration m_hd_configuration;
+        
+            /**
+             * The hd_keychain.
+             */
+            hd_keychain m_hd_keychain;
+        
+            /**
              * The default public key.
              */
             mutable key_public m_key_public_default;
@@ -737,34 +977,30 @@ namespace coin {
              */
             std::uint32_t m_master_key_max_id;
     
+            /**
+             * If true the wallet is file backed.
+             */
+            bool m_is_file_backed;
+        
         protected:
         
             /**
-             * The stack_impl.
+             * The flush timer handler.
              */
-            stack_impl & stack_impl_;
-            
+            void tick_flush(const boost::system::error_code &);
+        
             /**
              * The mutex.
              */
             mutable std::recursive_mutex mutex_;
         
-            /**
-             * If true the wallet is file backed.
-             */
-            bool is_file_backed_;
         
             /**
-             * The check interval.
-             */
-            enum { interval_check = 86400 };
-        
-            /**
-             * The check timer.
+             * The wallet flush timer.
              */
             boost::asio::basic_waitable_timer<
                 std::chrono::steady_clock
-            > check_timer_;
+            > timer_flush_;
         
             /**
              * The resend transactions timer.
@@ -777,6 +1013,23 @@ namespace coin {
              * The time of the last resend operation.
              */
             std::time_t time_last_resend_;
+        
+            /**
+             * The mutex_zerotime_lock_queue.
+             */
+            std::recursive_mutex mutex_zerotime_lock_queue_;
+        
+            /**
+             * The zerotime lock queue timer.
+             */
+            boost::asio::basic_waitable_timer<
+                std::chrono::steady_clock
+            > zerotime_lock_queue_timer_;
+        
+            /**
+             * The zerotime lock queue.
+             */
+            std::deque<sha256> zerotime_lock_queue_;
     };
     
 } // namespace coin

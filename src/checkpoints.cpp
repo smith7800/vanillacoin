@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of Vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * Vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -50,7 +50,76 @@ checkpoints::checkpoints()
     m_checkpoints[25037] = sha256(
         "000000f0316fc6613116f86bb9db5d0148b11fe656504c2dee7963bda6a7f49b"
     );
-
+    m_checkpoints[39152] = sha256(
+        "45efa8799d197cb8cf68434feb368ba915659466bed0c59a7501a5f44bbe637b"
+    );
+    m_checkpoints[42645] = sha256(
+        "e19e67db37789791b2a73b88e66d3437e696cc41efb507fbef133af57c2dab51"
+    );
+    m_checkpoints[44709] = sha256(
+        "a64bad605bd4964057b146af621fae6d4fa4325be74bb544480eba08211be8e1"
+    );
+    m_checkpoints[50308] = sha256(
+        "0000000003a60f5afb4fdc3dfb6aad412ddda4500646461d5516aad433271f81"
+    );
+    m_checkpoints[73568] = sha256(
+        "a9b99a0f9e04d0fdff3132d5e74fe8c7bc5b840e1c090644de704f774b53977f"
+    );
+    m_checkpoints[113966] = sha256(
+        "1e62cbed032e20bd11fc8a9663739cc1ad1da441a4472a507e9663b34dffe86c"
+    );
+    m_checkpoints[127440] = sha256(
+        "9cc61ef82c964da1ff42d720f81b2fb2f02f68dc172b0973dc2e4221d02d02a3"
+    );
+    m_checkpoints[193123] = sha256(
+        "c30086972070db8ed6a41ee40c5513466b0fd2659807519085a3bdabd6e28dda"
+    );
+    m_checkpoints[210000] = sha256(
+        "bf7966ccf7cba4c151cc6e990b320a1a097a886c15e2cc026c3f69690b375b67"
+    );
+    m_checkpoints[239306] = sha256(
+        "00000000000258dc0931448a2c333a7f22a9e4ce68c3d1098a58ecd576d9714f"
+    );
+    m_checkpoints[249556] = sha256(
+        "00000000000014d2a03f03655d6e47c7710f6bbd7080f645918f38fa1df8acca"
+    );
+    m_checkpoints[275000] = sha256(
+        "000000000000b1511fbc2beb3c2eff0f9e8b356e065ca36aadaf2b15925f1530"
+    );
+    m_checkpoints[300000] = sha256(
+        "7faf69f614805521e5c431ba215905a9027e89bd30f79b28a17bbdf98179919f"
+    );
+    m_checkpoints[325000] = sha256(
+        "5b5328da4a16f07f5c47c449c17754d1c4fce77918aaa1944953eee12190649e"
+    );
+    m_checkpoints[340000] = sha256(
+        "000000000000478dc5c5ead7ca6bb0421b61a8879c95a9e71c3cf161510d637c"
+    );
+    m_checkpoints[350000] = sha256(
+        "fc35f333efc1c30ce4d61a85246fd88ca7854914b283f250f5a5151fe758f511"
+    );
+    m_checkpoints[388800] = sha256(
+        "000000000000d7233c8735ecc5006fcd1aa4ecaf7c4525208c1459c9f4d21517"
+    );
+    m_checkpoints[400000] = sha256(
+        "000000000000bed29e0493ec2ae5cb4622542b3b574c6e69a30dbcc25bd003a9"
+    );
+    m_checkpoints[404500] = sha256(
+        "000000000001ec481b7427f43e57ea46a0e51b13c2d0395a6d0c2d7f15de2be1"
+    );
+    m_checkpoints[409500] = sha256(
+        "0000000000004899e0ca41b2af07c371226cab9fd3b269016195f5db2327ad14"
+    );
+    m_checkpoints[410267] = sha256(
+        "1144741b1fdf0f1336c9d398b69fcb74e81727697946b5295d296ccb8dd78a5b"
+    );
+    m_checkpoints[410776] = sha256(
+        "0000000000017a405efcae2f2ac7a22f0b205d8a200ff1171f83cbeae62acb27"
+    );
+    m_checkpoints[463158] = sha256(
+        "18c4b4b23c9783d2cd32436b333991f973a37897d1f501aa8d2a108770819840"
+    );
+    
     m_checkpoints_test_net[0] = block::get_hash_genesis_test_net();
 }
 
@@ -81,8 +150,7 @@ bool checkpoints::check_hardened(
 }
 
 bool checkpoints::check_sync(
-    const sha256 & hash_block,
-    const std::shared_ptr<block_index> & index_previous
+    const sha256 & hash_block, const block_index * index_previous
     )
 {
     std::lock_guard<std::recursive_mutex> l1(mutex_);
@@ -190,11 +258,11 @@ bool checkpoints::validate_sync_checkpoint(const sha256 & hash_checkpoint)
         globals::instance().block_indexes()[m_hash_sync_checkpoint]
     ;
     
-    auto index_checkpointRecv =
+    auto index_checkpoint_recv =
         globals::instance().block_indexes()[hash_checkpoint]
     ;
 
-    if (index_checkpointRecv->height() <= index_sync_checkpoint->height())
+    if (index_checkpoint_recv->height() <= index_sync_checkpoint->height())
     {
         /**
          * Received an older checkpoint, trace back from current checkpoint
@@ -203,7 +271,7 @@ bool checkpoints::validate_sync_checkpoint(const sha256 & hash_checkpoint)
         */
         auto pindex = index_sync_checkpoint;
         
-        while (pindex->height() > index_checkpointRecv->height())
+        while (pindex->height() > index_checkpoint_recv->height())
         {
             if (!(pindex = pindex->block_index_previous()))
             {
@@ -241,7 +309,7 @@ bool checkpoints::validate_sync_checkpoint(const sha256 & hash_checkpoint)
      * checkpoint. Trace back to the same height of current checkpoint
      * to verify.
      */
-    auto index = index_checkpointRecv;
+    auto index = index_checkpoint_recv;
     
     while (index->height() > index_sync_checkpoint->height())
     {
@@ -280,6 +348,146 @@ std::uint32_t checkpoints::get_total_blocks_estimate()
     return (
         constants::test_net ? m_checkpoints_test_net : m_checkpoints
     ).rbegin()->first;
+}
+
+std::map<std::int32_t, std::pair<sha256, std::time_t> >
+    checkpoints::get_spv_checkpoints()
+{
+    /**
+     * The checkpoint timestamps.
+     */
+    std::map<std::int32_t, std::pair<sha256, std::time_t> > ret;
+    
+    /**
+     * The test net doesn't have checkpoints.
+     */
+    if (constants::test_net == true)
+    {
+        return ret;
+    }
+
+	ret[0] = std::make_pair(sha256(
+		"15e96604fbcf7cd7e93d072a06f07ccfe1f8fd0099270a075c761c447403a783"),
+        1419310800
+	);
+	ret[4000] = std::make_pair(sha256(
+        "0000005daa461b5330897b9e8149142d6556fff12fcdf7b77eb40a6d76f1f3ad"),
+        1419506259
+    );
+    ret[8120] = std::make_pair(sha256(
+        "00000239d4c857d35b3b83c05287cbbb80b4f57c3d1807507ea915e7492dfa80"),
+        1419784967
+    );
+    ret[14800] = std::make_pair(sha256(
+        "73a4658541a0f01947333bdaad7702484109172f51cc1a1baadc1ed8b6b6dd33"),
+        1420103865
+    );
+    ret[17200] = std::make_pair(sha256(
+        "0000005b0acba32e7f43e2f676e0f72b0d189232a719e292623abf373e198b4f"),
+        1420159457
+    );
+    ret[23216] = std::make_pair(sha256(
+        "cf6621bd25c0270b382115a367823bab987ac472127265790673f1ba4e663345"),
+        1420445140
+    );
+    ret[25037] = std::make_pair(sha256(
+        "000000f0316fc6613116f86bb9db5d0148b11fe656504c2dee7963bda6a7f49b"),
+        1420610942
+    );
+    ret[39152] = std::make_pair(sha256(
+        "45efa8799d197cb8cf68434feb368ba915659466bed0c59a7501a5f44bbe637b"),
+        1421554015
+    );
+    ret[42645] = std::make_pair(sha256(
+        "e19e67db37789791b2a73b88e66d3437e696cc41efb507fbef133af57c2dab51"),
+        1421744137
+    );
+    ret[44709] = std::make_pair(sha256(
+        "a64bad605bd4964057b146af621fae6d4fa4325be74bb544480eba08211be8e1"),
+        1422148236
+    );
+    ret[50308] = std::make_pair(sha256(
+        "0000000003a60f5afb4fdc3dfb6aad412ddda4500646461d5516aad433271f81"),
+        1423702773
+    );
+    ret[73568] = std::make_pair(sha256(
+        "a9b99a0f9e04d0fdff3132d5e74fe8c7bc5b840e1c090644de704f774b53977f"),
+        1426207080
+    );
+    ret[113966] = std::make_pair(sha256(
+        "1e62cbed032e20bd11fc8a9663739cc1ad1da441a4472a507e9663b34dffe86c"),
+        1430629945
+    );
+    ret[127440] = std::make_pair(sha256(
+        "9cc61ef82c964da1ff42d720f81b2fb2f02f68dc172b0973dc2e4221d02d02a3"),
+        1433132338
+    );
+    ret[193123] = std::make_pair(sha256(
+        "c30086972070db8ed6a41ee40c5513466b0fd2659807519085a3bdabd6e28dda"),
+        1440815132
+    );
+    ret[210000] = std::make_pair(sha256(
+        "bf7966ccf7cba4c151cc6e990b320a1a097a886c15e2cc026c3f69690b375b67"),
+        1442676747
+    );
+    ret[239306] = std::make_pair(sha256(
+        "00000000000258dc0931448a2c333a7f22a9e4ce68c3d1098a58ecd576d9714f"),
+        1445990794
+    );
+    ret[249556] = std::make_pair(sha256(
+        "00000000000014d2a03f03655d6e47c7710f6bbd7080f645918f38fa1df8acca"),
+        1447163569
+    );
+    ret[275000] = std::make_pair(sha256(
+        "000000000000b1511fbc2beb3c2eff0f9e8b356e065ca36aadaf2b15925f1530"),
+        1450066441
+    );
+    ret[300000] = std::make_pair(sha256(
+        "7faf69f614805521e5c431ba215905a9027e89bd30f79b28a17bbdf98179919f"),
+        1452920121
+    );
+    ret[325000] = std::make_pair(sha256(
+        "5b5328da4a16f07f5c47c449c17754d1c4fce77918aaa1944953eee12190649e"),
+        1455781092
+    );
+    ret[340000] = std::make_pair(sha256(
+        "000000000000478dc5c5ead7ca6bb0421b61a8879c95a9e71c3cf161510d637c"),
+        1457394331
+    );
+    ret[350000] = std::make_pair(sha256(
+        "fc35f333efc1c30ce4d61a85246fd88ca7854914b283f250f5a5151fe758f511"),
+        1458477657
+    );
+    ret[388800] = std::make_pair(sha256(
+        "000000000000d7233c8735ecc5006fcd1aa4ecaf7c4525208c1459c9f4d21517"),
+        1462809732
+    );
+    ret[400000] = std::make_pair(sha256(
+        "000000000000bed29e0493ec2ae5cb4622542b3b574c6e69a30dbcc25bd003a9"),
+        1464073422
+    );
+    ret[404500] = std::make_pair(sha256(
+        "000000000001ec481b7427f43e57ea46a0e51b13c2d0395a6d0c2d7f15de2be1"),
+        1464586438
+    );
+    ret[409500] = std::make_pair(sha256(
+        "0000000000004899e0ca41b2af07c371226cab9fd3b269016195f5db2327ad14"),
+        1465150759
+    );
+    ret[410267] = std::make_pair(sha256(
+        "1144741b1fdf0f1336c9d398b69fcb74e81727697946b5295d296ccb8dd78a5b"),
+        1465236780
+    );
+    ret[410776] = std::make_pair(sha256(
+        "0000000000017a405efcae2f2ac7a22f0b205d8a200ff1171f83cbeae62acb27"),
+        1465294865
+    );
+    ret[463158] = std::make_pair(sha256(
+        "18c4b4b23c9783d2cd32436b333991f973a37897d1f501aa8d2a108770819840"),
+        1471224073
+    );
+    
+    return ret;
 }
 
 sha256 & checkpoints::get_hash_sync_checkpoint()
@@ -338,7 +546,7 @@ const checkpoint_sync & checkpoints::get_checkpoint_message_pending() const
     return m_checkpoint_message_pending;
 }
 
-std::shared_ptr<block_index> checkpoints::get_last_sync_checkpoint()
+const block_index * checkpoints::get_last_sync_checkpoint()
 {
     if (globals::instance().block_indexes().count(m_hash_sync_checkpoint) == 0)
     {
@@ -348,7 +556,7 @@ std::shared_ptr<block_index> checkpoints::get_last_sync_checkpoint()
             m_hash_sync_checkpoint.to_string() << "."
         );
         
-        return std::shared_ptr<block_index> ();
+        return 0;
     }
     
     return globals::instance().block_indexes()[m_hash_sync_checkpoint];
@@ -460,7 +668,7 @@ bool checkpoints::send_sync_checkpoint(
      */
     if (checkpoint_sync::master_private_key().size() == 0)
     {
-        log_error("SendSyncCheckpoint: Checkpoint master key unavailable.");
+        log_error("Checkpoints,  master key unavailable.");
         
         return false;
     }

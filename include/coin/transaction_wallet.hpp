@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -44,6 +44,11 @@ namespace coin {
              * Constructor
              */
             transaction_wallet();
+        
+            /**
+             * Constructor
+             */
+            transaction_wallet(const wallet * ptr_wallet);
         
             /**
              * Constructor
@@ -118,15 +123,22 @@ namespace coin {
             void add_supporting_transactions(db_tx & tx_db);
         
             /**
+             * Adds supporting transactions.
+             */
+            void spv_add_supporting_transactions();
+        
+            /**
              * Accepts a wallet transaction.
              * @param tx_db The db_tx.
              */
-            bool accept_wallet_transaction(db_tx & tx_db);
+            std::pair<bool, std::string> accept_wallet_transaction(
+                db_tx & tx_db
+            );
 
             /**
              * Accepts a wallet transaction.
              */
-            bool accept_wallet_transaction();
+            std::pair<bool, std::string> accept_wallet_transaction();
 
             /**
              * Marks certain transaction out's as spent.
@@ -149,7 +161,7 @@ namespace coin {
              * Marks spent.
              * @param out The out.
              */
-            void mark_spent(const std::uint32_t & out);
+            bool mark_spent(const std::uint32_t & out);
     
             /** 
              * Marks unspent.
@@ -181,6 +193,24 @@ namespace coin {
             std::int64_t
                 get_available_credit(const bool & use_cache = true) const
             ;
+        
+            /**
+             * Gets the available (denominated) credit.
+             * @param use_cache If true the cache will be used.
+             */
+            std::int64_t
+                get_available_denominated_credit(
+                    const bool & use_cache = true
+            ) const;
+        
+            /**
+             * Gets the available (chainblended) credit.
+             * @param use_cache If true the cache will be used.
+             */
+            std::int64_t
+                get_available_chainblended_credit(
+                    const bool & use_cache = true
+            ) const;
     
             /**
              * Writes to disk.
@@ -190,21 +220,42 @@ namespace coin {
             /**
              * Relays a wallet transaction.
              * @param connection_manager The tcp_connection_manager.
+             * @param use_udp If true it will be broadcast over UDP.
              */
             void relay_wallet_transaction(
                 const std::shared_ptr<tcp_connection_manager> &
-                connection_manager
+                connection_manager, const bool & use_udp
             );
         
             /**
              * Relays a wallet transaction.
              * @param tx_db The db_tx.
              * @param connection_manager The tcp_connection_manager.
+             * @param use_udp If true it will be broadcast over UDP.
              */
             void relay_wallet_transaction(
                 db_tx & tx_db,
                 const std::shared_ptr<tcp_connection_manager> &
+                connection_manager, const bool & use_udp
+            );
+        
+            /**
+             * Relays a wallet transaction.
+             * @param connection_manager The tcp_connection_manager.
+             */
+            void spv_relay_wallet_transaction(
+                const std::shared_ptr<tcp_connection_manager> &
                 connection_manager
+            );
+        
+            /**
+             * Relays a zerotime_lock for the wallet transaction.
+             * @param connection_manager The tcp_connection_manager.
+             * @param use_udp If true it will be broadcast over UDP.
+             */
+            void relay_wallet_zerotime_lock(
+                const std::shared_ptr<tcp_connection_manager> &
+                connection_manager, const bool & use_udp
             );
 
             /**
@@ -218,6 +269,11 @@ namespace coin {
              * The values.
              */
             std::map<std::string, std::string> & values();
+        
+            /**
+             * The values.
+             */
+            const std::map<std::string, std::string> & values() const;
         
             /**
              * Sets the time received is trnsaction time.
@@ -404,6 +460,26 @@ namespace coin {
              * The amount of available cached credit
              */
             mutable std::int64_t available_credit_cached_;
+        
+            /**
+             * If true available (denominated) credit is cached.
+             */
+            mutable bool available_denominated_credit_is_cached_;
+        
+            /**
+             * The amount of available cached (denominated) credit
+             */
+            mutable std::int64_t available_denominated_credit_cached_;
+
+            /**
+             * If true available (chainblended) credit is cached.
+             */
+            mutable bool available_chainblended_credit_is_cached_;
+        
+            /**
+             * The amount of available cached (chainblended) credit
+             */
+            mutable std::int64_t available_chainblended_credit_cached_;
         
             /**
              * If true if change is cached.

@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -22,8 +22,11 @@
 #define COIN_NETWORK_HPP
 
 #include <clocale>
+#include <cstdint>
 #include <ctime>
+#include <map>
 #include <mutex>
+#include <set>
 #include <string>
 
 #include <coin/logger.hpp>
@@ -38,6 +41,18 @@ namespace coin {
         public:
         
             /**
+             * Constructor
+             */
+            network()
+            {
+                /**
+                 * Insert the "always" allowed RPC IP addresses.
+                 */
+                m_allowed_addresses_rpc.insert("127.0.0.1");
+                m_allowed_addresses_rpc.insert("::1");
+            }
+        
+            /**
              * The singleton accessor.
              */
             static network & instance()
@@ -50,12 +65,12 @@ namespace coin {
             /**
              * The minimum number of inbound TCP connections.
              */
-            enum { tcp_inbound_minimum = 8 };
+            enum { tcp_inbound_minimum = 16 };
         
             /**
              * The maximum number of inbound TCP connections.
              */
-            enum { tcp_inbound_maximum = 36 };
+            enum { tcp_inbound_maximum = 128 };
     
             /**
              * rfc1123 time.
@@ -84,6 +99,16 @@ namespace coin {
             }
         
             /**
+             * The allowed addresses.
+             */
+            std::set<std::string> & allowed_addresses_rpc()
+            {
+                std::lock_guard<std::mutex> l1(mutex_);
+                
+                return m_allowed_addresses_rpc;
+            }
+        
+            /**
              * The banned addresses.
              */
             std::map<std::string, std::time_t> & banned_addresses()
@@ -94,16 +119,23 @@ namespace coin {
             }
         
             /**
-             * Bans an address for 24 hours.
+             * Bans an address for seconds.
              * @param addr The address.
+             * @param seconds The seconds.
              */
-            void ban_address(const std::string & addr)
+            void ban_address(
+                const std::string & addr,
+                const std::uint32_t & seconds = 24 * 60 * 60
+                )
             {
                 std::lock_guard<std::mutex> l1(mutex_);
                 
-                log_info("Network is banning address " << addr << ".");
+                log_info(
+                    "Network is banning address " << addr << ", for " <<
+                    seconds / 60 / 60 << " hours."
+                );
                 
-                m_banned_addresses[addr] = std::time(0) + 24 * 60 * 60;
+                m_banned_addresses[addr] = std::time(0) + seconds;
             }
         
             /**
@@ -136,7 +168,24 @@ namespace coin {
                 return false;
             }
         
+            /**
+             * If true the address is allowed.
+             * @param addr The address.
+             */
+            bool is_address_rpc_allowed(const std::string & addr)
+            {
+                return
+                    m_allowed_addresses_rpc.find(addr) !=
+                    m_allowed_addresses_rpc.end()
+                ;
+            }
+        
         private:
+        
+            /**
+             * The allowed addresses.
+             */
+            std::set<std::string> m_allowed_addresses_rpc;
         
             /**
              * The banned addresses.

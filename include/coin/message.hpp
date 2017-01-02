@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -25,6 +25,7 @@
 #include <string>
 
 #include <coin/data_buffer.hpp>
+#include <coin/protocol.hpp>
 
 namespace coin {
 
@@ -34,6 +35,11 @@ namespace coin {
     class message : public data_buffer
     {
         public:
+        
+            /**
+             * The header magic length.
+             */
+            enum { header_magic_length = 4 };
         
             /**
              * Constructor
@@ -72,6 +78,11 @@ namespace coin {
              */
             bool verify_header_magic();
 
+            /**
+             * The header magic.
+             */
+            static std::vector<std::uint8_t> header_magic_bytes();
+        
             /**
              * The header magic number.
              */
@@ -146,6 +157,16 @@ namespace coin {
             protocol::block_t & protocol_block();
         
             /**
+             * The protocol getheaders structure.
+             */
+            protocol::getheaders_t & protocol_getheaders();
+        
+            /**
+             * The protocol headers structure.
+             */
+            protocol::headers_t & protocol_headers();
+        
+            /**
              * The protocol checkpoint structure.
              */
             protocol::checkpoint_t & protocol_checkpoint();
@@ -159,6 +180,86 @@ namespace coin {
              * The protocol alert structure.
              */
             protocol::alert_t & protocol_alert();
+        
+            /**
+             * The protocol filterload.
+             */
+            protocol::filterload_t & protocol_filterload();
+        
+            /**
+             * The protocol filteradd.
+             */
+            protocol::filteradd_t & protocol_filteradd();
+        
+            /**
+             * The protocol merkleblock.
+             */
+            protocol::merkleblock_t & protocol_merkleblock();
+        
+            /**
+             * The protocol ztlock structure.
+             */
+            protocol::ztlock_t & protocol_ztlock();
+        
+            /**
+             * The protocol ztquestion structure.
+             */
+            protocol::ztquestion_t & protocol_ztquestion();
+        
+            /**
+             * The protocol ztanswer structure.
+             */
+            protocol::ztanswer_t & protocol_ztanswer();
+        
+            /**
+             * The protocol ztvote structure.
+             */
+            protocol::ztvote_t & protocol_ztvote();
+        
+            /**
+             * The protocol ianswer structure.
+             */
+            protocol::ianswer_t & protocol_ianswer();
+        
+            /**
+             * The protocol iquestion structure.
+             */
+            protocol::iquestion_t & protocol_iquestion();
+        
+            /**
+             * The protocol ivote structure.
+             */
+            protocol::ivote_t & protocol_ivote();
+        
+            /**
+             * The protocol isync structure.
+             */
+            protocol::isync_t & protocol_isync();
+
+            /**
+             * The protocol icols structure.
+             */
+            protocol::icols_t & protocol_icols();
+        
+            /**
+             * The protocol cbbroadcast structure.
+             */
+            protocol::cbbroadcast_t & protocol_cbbroadcast();
+        
+            /**
+             * The protocol cbjoin structure.
+             */
+            protocol::cbjoin_t & protocol_cbjoin();
+        
+            /**
+             * The protocol cbleave structure.
+             */
+            protocol::cbleave_t & protocol_cbleave();
+        
+            /**
+             * The protocol cbstatus structure.
+             */
+            protocol::cbstatus_t & protocol_cbstatus();
         
         private:
         
@@ -213,6 +314,16 @@ namespace coin {
             protocol::block_t m_protocol_block;
         
             /**
+             * The protocol getheaders structure.
+             */
+            protocol::getheaders_t m_protocol_getheaders;
+        
+            /**
+             * The protocol headers structure.
+             */
+            protocol::headers_t m_protocol_headers;
+        
+            /**
              * The protocol checkpoint structure.
              */
             protocol::checkpoint_t m_protocol_checkpoint;
@@ -226,6 +337,86 @@ namespace coin {
              * The protocol alert structure.
              */
             protocol::alert_t m_protocol_alert;
+        
+            /**
+             * The protocol filterload.
+             */
+            protocol::filterload_t m_protocol_filterload;
+        
+            /**
+             * The protocol filteradd.
+             */
+            protocol::filteradd_t m_protocol_filteradd;
+        
+            /**
+             * The protocol merkleblock.
+             */
+            protocol::merkleblock_t m_protocol_merkleblock;
+        
+            /**
+             * The protocol ztlock structure.
+             */
+            protocol::ztlock_t m_protocol_ztlock;
+        
+            /**
+             * The protocol ztquestion structure.
+             */
+            protocol::ztquestion_t m_protocol_ztquestion;
+        
+            /**
+             * The protocol ztanswer structure.
+             */
+            protocol::ztanswer_t m_protocol_ztanswer;
+        
+            /**
+             * The protocol ztvote structure.
+             */
+            protocol::ztvote_t m_protocol_ztvote;
+        
+            /**
+             * The protocol ianswer structure.
+             */
+            protocol::ianswer_t m_protocol_ianswer;
+        
+            /**
+             * The protocol iquestion structure.
+             */
+            protocol::iquestion_t m_protocol_iquestion;
+        
+            /**
+             * The protocol ivote structure.
+             */
+            protocol::ivote_t m_protocol_ivote;
+        
+            /**
+             * The protocol isync structure.
+             */
+            protocol::isync_t m_protocol_isync;
+
+            /**
+             * The protocol icols structure.
+             */
+            protocol::icols_t m_protocol_icols;
+        
+            /**
+             * The protocol cbbroadcast structure.
+             */
+            protocol::cbbroadcast_t m_protocol_cbbroadcast;
+        
+            /**
+             * The protocol cbjoin structure.
+             */
+            protocol::cbjoin_t m_protocol_cbjoin;
+        
+            /**
+             * The protocol cbleave structure.
+             */
+            protocol::cbleave_t m_protocol_cbleave;
+        
+            /**
+             * The protocol cbstatus structure.
+             */
+            protocol::cbstatus_t m_protocol_cbstatus;
         
         protected:
         
@@ -265,6 +456,16 @@ namespace coin {
             data_buffer create_getblocks();
         
             /**
+             * Creates getheaders.
+             */
+            data_buffer create_getheaders();
+        
+            /**
+             * Creates headers.
+             */
+            data_buffer create_headers();
+        
+            /**
              * Creates a checkpoint.
              */
             data_buffer create_checkpoint();
@@ -273,6 +474,26 @@ namespace coin {
              * Creates a block.
              */
             data_buffer create_block();
+ 
+            /**
+             * Creates a filterload.
+             */
+            data_buffer create_filterload();
+        
+            /**
+             * Creates a filteradd.
+             */
+            data_buffer create_filteradd();
+        
+            /**
+             * Creates a filterclear.
+             */
+            data_buffer create_filterclear();
+  
+            /**
+             * Creates a merkleblock.
+             */
+            data_buffer create_merkleblock();
         
             /**
              * Creates a tx.
@@ -283,6 +504,71 @@ namespace coin {
              * Creates an alert.
              */
             data_buffer create_alert();
+        
+            /**
+             * Creates an ztlock.
+             */
+            data_buffer create_ztlock();
+        
+            /**
+             * Creates an ztquestion.
+             */
+            data_buffer create_ztquestion();
+        
+            /**
+             * Creates an ztanswer.
+             */
+            data_buffer create_ztanswer();
+        
+            /**
+             * Creates an ztvote.
+             */
+            data_buffer create_ztvote();
+        
+            /**
+             * Creates an ianswer.
+             */
+            data_buffer create_ianswer();
+        
+            /**
+             * Creates an iquestion.
+             */
+            data_buffer create_iquestion();
+        
+            /**
+             * Creates an ivote.
+             */
+            data_buffer create_ivote();
+        
+            /**
+             * Creates an isync.
+             */
+            data_buffer create_isync();
+        
+            /**
+             * Creates an icols.
+             */
+            data_buffer create_icols();
+        
+            /**
+             * Creates an cbbroadcast.
+             */
+            data_buffer create_cbbroadcast();
+        
+            /**
+             * Creates an cbjoin.
+             */
+            data_buffer create_cbjoin();
+        
+            /**
+             * Creates an cbleave.
+             */
+            data_buffer create_cbleave();
+        
+            /**
+             * Creates an cbstatus.
+             */
+            data_buffer create_cbstatus();
     };
     
 } // namespace coin

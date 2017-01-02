@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -62,13 +62,18 @@ namespace coin {
             /**
              * The crypted key.
              */
+            std::vector<std::uint8_t> & crypted_key();
+        
+            /**
+             * The crypted key.
+             */
             const std::vector<std::uint8_t> & crypted_key() const;
         
             /**
              * The salt.
              */
             std::vector<std::uint8_t> & salt();
-
+        
             /**
              * The derivation method.
              */

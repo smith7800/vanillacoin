@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -32,6 +32,7 @@
 namespace coin {
 
     class block;
+    class transaction_wallet;
     
     /**
      * Implements a wallet manager.
@@ -83,6 +84,15 @@ namespace coin {
             );
         
             /**
+             * Gets a transaction given hash.
+             * @param hash_tx The hash of the transaction.
+             * @param wtx_out The transaction_wallet (out)
+             */
+            bool get_transaction(
+                const sha256 & hash_tx, transaction_wallet & wtx_out
+            );
+        
+            /**
              * Sets the best chain.
              * @param val The value.
              */
@@ -93,6 +103,15 @@ namespace coin {
              * @param val The sha256.
              */
             void on_transaction_updated(const sha256 & val);
+        
+            /**
+             * Called when a transaction has been updated.
+             * @param height The height of the block the transaction is in.
+             * @param val The sha256.
+             */
+            void on_spv_transaction_updated(
+                const std::int32_t & height, const sha256 & hash_tx
+            );
         
             /**
              * Called when inventory has changed.

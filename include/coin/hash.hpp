@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -24,6 +24,7 @@
 #include <array>
 #include <cstdint>
 
+#include <coin/blake256.hpp>
 #include <coin/sha256.hpp>
 #include <coin/whirlpool.hpp>
 
@@ -97,6 +98,25 @@ namespace coin {
             );
         
             /**
+             * Calculates a blake256 hash.
+             * @param buf The buffer.
+             * @param len The length.
+             */
+            static std::array<std::uint8_t, blake256::digest_length>
+                blake2568round(const std::uint8_t * buf, const std::size_t & len
+            );
+        
+            /**
+             * Calculates the Murmur3 hash.
+             * @param buf The buffer.
+             * @param len The length.
+             */
+            static std::uint32_t murmur3(
+                const std::uint32_t & seed, const std::uint8_t * buf,
+                const std::size_t & len
+            );
+        
+            /**
              * Returns a 64-bit representation of the input.
              * @param buf The buffer.
              * @param n The n.
@@ -104,6 +124,11 @@ namespace coin {
             static std::uint64_t to_uint64(
                 const std::uint8_t * buf, const std::size_t & n = 0
             );
+        
+            /**
+             * Runs the test case.
+             */
+            static int run_test();
     
         private:
         

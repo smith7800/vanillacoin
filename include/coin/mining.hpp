@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -82,6 +82,21 @@ namespace coin {
              * @param out_header The block::header_t out.
              */
             static std::uint32_t scan_hash_whirlpool(
+                block::header_t * in_header, std::uint32_t max_nonce,
+                std::uint32_t & out_hashes, std::uint8_t * out_digest,
+                block::header_t * out_header
+            );
+        
+            /**
+             * Increments a nonce in the block header and hashes it and then
+             * scans it for at least some zero bits.
+             * @param in_header The block::header_t in.
+             * @param max_nonce The maximum nonce.
+             * @param out_hashes The number of hashes out.
+             * @param out_digest The digest out.
+             * @param out_header The block::header_t out.
+             */
+            static std::uint32_t scan_hash_blake256(
                 block::header_t * in_header, std::uint32_t max_nonce,
                 std::uint32_t & out_hashes, std::uint8_t * out_digest,
                 block::header_t * out_header

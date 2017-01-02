@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -31,10 +31,14 @@
 #endif // (defined _WIN32 || defined WIN32) || (defined _WIN64 || defined WIN64)
 
 #include <iostream>
+#include <fstream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 
 #include <mutex>
+
+#include <coin/filesystem.hpp>
 
 namespace coin {
 
@@ -88,11 +92,39 @@ namespace coin {
              */
 			void log(std::stringstream & val)
 			{
-			    static const bool use_file = false;
+                std::lock_guard<std::recursive_mutex> l1(mutex_);
+                
+			    static const bool use_file = true;
 
 			    if (use_file)
 			    {
-                    // ...
+                    static std::string path =
+                        filesystem::data_path() + "debug.log"
+                    ;
+                    
+                    if (ofstream_.is_open() == false)
+                    {
+                        ofstream_.open(
+                            path, std::fstream::out | std::fstream::app
+                        );
+                    }
+                    
+                    if (ofstream_.is_open() == true)
+                    {
+                        /**
+                         * Limit size.
+                         */
+                        if (ofstream_.tellp() > 10 * 1000000)
+                        {
+                            ofstream_.close();
+                            
+                            ofstream_.open(path, std::fstream::out);
+                        }
+                        
+                        ofstream_ << val.str() << std::endl;
+                        
+                        ofstream_.flush();
+                    }
 			    }
 
 			    static bool use_cout = true;
@@ -139,7 +171,15 @@ namespace coin {
             
         protected:
         
-            // ...
+            /**
+             * The std::ofstream.
+             */
+            std::ofstream ofstream_;
+        
+            /**
+             * The std::recursive_mutex.
+             */
+            std::recursive_mutex mutex_;
     };
     
     #define log_xx(severity, strm) \

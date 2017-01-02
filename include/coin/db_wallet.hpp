@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -27,13 +27,17 @@
 
 #include <coin/accounting_entry.hpp>
 #include <coin/db.hpp>
+#include <coin/filesystem.hpp>
 #include <coin/key.hpp>
 #include <coin/sha256.hpp>
 
 namespace coin {
     
+    class account;
     class block_locator;
     class data_buffer;
+    class db_env;
+    class hd_configuration;
     class key_pool;
     class key_public;
     class key_wallet_master;
@@ -63,9 +67,13 @@ namespace coin {
         
             /**
              * Constructor
+             * @param file_name The file name.
              * @param file_mode The file mode.
              */
-            db_wallet(const std::string & file_mode = "+r");
+            db_wallet(
+                const std::string & file_name,
+                const std::string & file_mode = "+r"
+            );
         
             /**
              * Loads a wallet from the database into the wallet class.
@@ -79,6 +87,35 @@ namespace coin {
              */
             error_t reorder_transactions(wallet & w);
         
+            /**
+             * Performs a wallet backup operation.
+             * @param w The wallet.
+             * @param root_path The root path.
+             */
+            static bool backup(
+                const wallet & w,
+                const std::string & root_path = filesystem::data_path()
+            );
+        
+            /**
+             * Attempts to recover a wallet database file.
+             * @param env The db_env.
+             * @param file_name The file name.
+             * @param keys_only If true only the keys will attempted to be
+             * recovered.
+             */
+            static bool recover(
+                db_env & env, const std::string & file_name,
+                const bool & keys_only
+            );
+        
+            /**
+             * Attempts to recover a wallet database file.
+             * @param env The db_env.
+             * @param file_name The file name.
+             */
+            static bool recover(db_env & env, const std::string & file_name);
+    
             /**
              * Reads a key/value pair.
              * @param w The wallet.
@@ -106,6 +143,20 @@ namespace coin {
             bool write_name(const std::string & addr, const std::string & name);
         
             /**
+             * Reads an account.
+             * @param name The name of the account.
+             * @param acct The account.
+             */
+            bool read_account(const std::string & name, account & acct);
+        
+            /**
+             * Writes an account.
+             * @param name The name of the account.
+             * @param acct The account.
+             */
+            bool write_account(const std::string & name, account & acct);
+    
+            /**
              * Erases a transaction.
              * @param val The sha256.
              */
@@ -123,6 +174,12 @@ namespace coin {
              * @param value The value.
              */
             bool write_orderposnext(const std::int64_t & value);
+        
+            /**
+             * Writes the timestamp.
+             * @param value The value.
+             */
+            bool write_timestamp(const std::time_t & value);
         
             /**
              * Writes the default key.
@@ -227,6 +284,12 @@ namespace coin {
             bool write_accounting_entry(accounting_entry & entry);
         
             /**
+             * Writes the hd_configuration.
+             * @param val The value.
+             */
+            bool write_hd_configuration(const hd_configuration & val);
+        
+            /**
              * Gets the given account's credit and debit.
              * @param account The account name.
              */
@@ -242,12 +305,17 @@ namespace coin {
                 std::list<accounting_entry> & entries
             );
         
+            /**
+             * The number of times the wallet has been updated.
+             */
+            static const std::uint32_t & wallet_updated();
+        
         private:
         
             /**
              * The number of times the wallet has been updated.
              */
-            std::uint32_t m_wallet_updated;
+            static std::uint32_t g_wallet_updated;
         
         protected:
         

@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -18,18 +18,16 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <coin/globals.hpp>
 #include <coin/stack_impl.hpp>
 #include <coin/status_manager.hpp>
 
 using namespace coin;
 
-status_manager::status_manager(
-    boost::asio::io_service & ios, boost::asio::strand & s, stack_impl & owner
-    )
-    : io_service_(ios)
-    , strand_(s)
+status_manager::status_manager(stack_impl & owner)
+    : strand_(io_service_)
     , stack_impl_(owner)
-    , timer_(ios)
+    , timer_(io_service_)
 {
     // ...
 }
@@ -40,19 +38,49 @@ void status_manager::start()
      * Start the timer.
      */
     do_tick(interval_callback);
+    
+    /**
+     * Allocate the thread.
+     */
+    thread_ = std::thread(&status_manager::loop, this);
 }
 
 void status_manager::stop()
 {
     timer_.cancel();
     pairs_.clear();
+    
+    if (thread_.joinable())
+    {
+        thread_.join();
+    }
+    
+    io_service_.reset();
 }
 
 void status_manager::insert(const std::map<std::string, std::string> & pairs)
 {
-    std::lock_guard<std::mutex> l1(mutex_);
-
-    pairs_.push_back(pairs);
+#if (defined __linux__ && !defined __ANDROID__)
+    /**
+     * Ignore status updates on linux (until there is a UI).
+     */
+#else
+    io_service_.post(strand_.wrap(
+        [this, pairs]()
+    {
+        auto was_empty = pairs_.size() == 0;
+        
+        pairs_.push_back(pairs);
+        
+        if (was_empty == true)
+        {
+            /**
+             * Start the timer.
+             */
+            do_tick(interval_callback);
+        }
+    }));
+#endif // __linux__
 }
 
 void status_manager::do_tick(const std::uint32_t & interval)
@@ -69,8 +97,6 @@ void status_manager::do_tick(const std::uint32_t & interval)
         }
         else
         {
-            std::lock_guard<std::mutex> l1(mutex_);
-
             if (pairs_.size() > 0)
             {
                 /**
@@ -112,4 +138,9 @@ void status_manager::do_tick(const std::uint32_t & interval)
             }
         }
     }));
+}
+
+void status_manager::loop()
+{
+    io_service_.run();
 }

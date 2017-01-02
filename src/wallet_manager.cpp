@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -112,6 +112,23 @@ void wallet_manager::sync_with_wallets(
     }
 }
 
+bool wallet_manager::get_transaction(
+    const sha256 & hash_tx, transaction_wallet & wtx_out
+    )
+{
+    std::lock_guard<std::mutex> l1(mutex_);
+    
+    for (auto & i : m_wallets)
+    {
+        if (i->get_transaction(hash_tx, wtx_out))
+        {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
 void wallet_manager::set_best_chain(const block_locator val)
 {
     std::lock_guard<std::mutex> l1(mutex_);
@@ -129,6 +146,18 @@ void wallet_manager::on_transaction_updated(const sha256 & val)
     for (auto & i : m_wallets)
     {
         i->on_transaction_updated(val);
+    }
+}
+
+void wallet_manager::on_spv_transaction_updated(
+    const std::int32_t & height, const sha256 & hash_tx
+    )
+{
+    std::lock_guard<std::mutex> l1(mutex_);
+    
+    for (auto & i : m_wallets)
+    {
+        i->on_spv_transaction_updated(height, hash_tx);
     }
 }
 

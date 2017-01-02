@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2013-2014 John Connor (BM-NC49AxAjcqVcF5jNPu85Rb8MJ2d9JqZt)
+ * Copyright (c) 2016-2017 The Vcash Community Developers
  *
- * This file is part of coinpp.
+ * This file is part of vcash.
  *
- * coinpp is free software: you can redistribute it and/or modify
+ * vcash is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License with
  * additional permissions to the one published by the Free Software
  * Foundation, either version 3 of the License, or (at your option)
@@ -22,6 +22,7 @@
 #define COIN_FILESYSTEM_HPP
 
 #include <string>
+#include <vector>
 
 namespace coin {
 
@@ -35,15 +36,37 @@ namespace coin {
             static int error_already_exists;
         
             /**
-             * Creates the last folder of the given path.
+             * Creates the last directory of the given path.
              * @param path The path.
              */
             static int create_path(const std::string & path);
+        
+            /**
+             * Copies a file from source to destination.
+             * @param src The source.
+             * @param dest The destination.
+             */
+            static bool copy_file(
+                const std::string & src, const std::string & dest
+            );
+        
+            /**
+             * Gets the directory contents at the specified path.
+             * @param path The path.
+             */
+            static std::vector<std::string> path_contents(
+                const std::string & path
+            );
         
             /** 
              * The user data directory.
              */
             static std::string data_path();
+        
+            /** 
+             * The (old) user data directory.
+             */
+            static std::string data_path_old();
         
         private:
         
